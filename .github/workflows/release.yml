@@ -20,36 +20,42 @@ jobs:
           - name: windows-x64
             runner: windows-latest
             target: x86_64-pc-windows-msvc
+            bundles: none
             artifact_name: Web-Paste_windows_x64.exe
             binary_name: Web Paste.exe
             binary_subdir: release
           - name: windows-arm64
             runner: windows-11-arm
             target: aarch64-pc-windows-msvc
+            bundles: none
             artifact_name: Web-Paste_windows_arm64.exe
             binary_name: Web Paste.exe
             binary_subdir: release
           - name: macos-x64
             runner: macos-15-intel
             target: x86_64-apple-darwin
-            artifact_name: Web-Paste_macos_x64
+            bundles: dmg
+            artifact_name: Web-Paste_macos_x64.dmg
             binary_name: Web Paste
             binary_subdir: release
           - name: macos-arm64
             runner: macos-latest
             target: aarch64-apple-darwin
-            artifact_name: Web-Paste_macos_arm64
+            bundles: dmg
+            artifact_name: Web-Paste_macos_arm64.dmg
             binary_name: Web Paste
             binary_subdir: release
           - name: linux-x64
             runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
+            bundles: none
             artifact_name: Web-Paste_linux_x64
             binary_name: web-paste
             binary_subdir: release
           - name: linux-arm64
             runner: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
+            bundles: none
             artifact_name: Web-Paste_linux_arm64
             binary_name: web-paste
             binary_subdir: release
@@ -89,13 +95,40 @@ jobs:
         run: npm ci
 
       - name: Build Tauri binary
-        run: npm run tauri:build -- --target ${{ matrix.target }} --bundles none
+        run: npm run tauri:build -- --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
 
-      - name: Collect executable
+      - name: Collect release asset
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p release-assets
+
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            dmg=""
+            for bundle_dir in \
+              "src-tauri/target/${{ matrix.target }}/release/bundle/dmg" \
+              "src-tauri/target/release/bundle/dmg"
+            do
+              if [ -d "$bundle_dir" ]; then
+                for candidate in "$bundle_dir"/*.dmg; do
+                  if [ -f "$candidate" ]; then
+                    dmg="$candidate"
+                    break 2
+                  fi
+                done
+              fi
+            done
+
+            if [ -z "$dmg" ]; then
+              echo "macOS DMG not found. Built files under src-tauri/target:"
+              find src-tauri/target -maxdepth 5 -type f -o -type d | sort
+              exit 1
+            fi
+
+            cp "$dmg" "release-assets/${{ matrix.artifact_name }}"
+            exit 0
+          fi
+
           binary=""
           for candidate in \
             "src-tauri/target/${{ matrix.target }}/${{ matrix.binary_subdir }}/${{ matrix.binary_name }}" \

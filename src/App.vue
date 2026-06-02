@@ -1,5 +1,5 @@
 <template>
-  <main class="h-screen overflow-hidden bg-[#f5f6f7] text-slate-900">
+  <main class="h-screen overflow-hidden bg-[#f5f6f7] text-slate-900" :class="themeClass">
     <section v-if="!initialized" class="grid min-h-screen place-items-center">
       <div class="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-600 shadow-sm">
         <LoaderCircle :size="18" class="animate-spin text-blue-600" />
@@ -287,6 +287,36 @@
 
               <section class="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
                 <div class="mb-4 flex items-center gap-2">
+                  <Monitor :size="18" class="text-slate-700" />
+                  <h2 class="text-sm font-bold text-slate-950">外观</h2>
+                </div>
+                <div class="grid gap-1.5">
+                  <span class="text-xs font-bold text-slate-500">主题</span>
+                  <div class="grid grid-cols-2 gap-2">
+                    <button
+                      class="inline-flex h-10 items-center justify-center gap-2 rounded-md border px-3 text-sm font-bold"
+                      :class="uiTheme === 'white' ? 'border-slate-950 bg-slate-950 text-white' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'"
+                      type="button"
+                      @click="setUiTheme('white')"
+                    >
+                      <Sun :size="16" />
+                      白色
+                    </button>
+                    <button
+                      class="inline-flex h-10 items-center justify-center gap-2 rounded-md border px-3 text-sm font-bold"
+                      :class="uiTheme === 'black' ? 'border-slate-950 bg-slate-950 text-white' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'"
+                      type="button"
+                      @click="setUiTheme('black')"
+                    >
+                      <Moon :size="16" />
+                      黑色
+                    </button>
+                  </div>
+                </div>
+              </section>
+
+              <section class="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+                <div class="mb-4 flex items-center gap-2">
                   <Monitor :size="18" class="text-violet-600" />
                   <h2 class="text-sm font-bold text-slate-950">设备</h2>
                 </div>
@@ -397,6 +427,7 @@ import {
   LogIn,
   LogOut,
   Monitor,
+  Moon,
   Pause,
   Play,
   RefreshCw,
@@ -404,6 +435,7 @@ import {
   Search,
   Settings,
   ShieldCheck,
+  Sun,
   Trash2,
   Webhook,
   X
@@ -443,7 +475,10 @@ type Notice = {
   text: string;
 };
 
+type UiTheme = 'white' | 'black';
+
 const defaultApiBase = 'https://paste-api.dangolabs.top';
+const uiThemeStorageKey = 'web-paste-ui-theme';
 
 const settings = ref<ClientSettings>({
   api_base: defaultApiBase,
@@ -483,6 +518,7 @@ const clearingHistory = ref(false);
 const copyingId = ref('');
 const errorMessage = ref('');
 const notice = ref<Notice | null>(null);
+const uiTheme = ref<UiTheme>(readStoredUiTheme());
 const shortcutRecording = ref(false);
 const imagePreviewUrls = ref(new Map<string, string>());
 const imagePreviewFailedIds = ref(new Set<string>());
@@ -499,6 +535,7 @@ const isSignedIn = computed(() => Boolean(settings.value.token && settings.value
 const needsOnboarding = computed(() => !settings.value.offline_mode && !isSignedIn.value);
 const pendingCount = computed(() => history.value.filter((item) => !item.synced).length);
 const syncedCount = computed(() => history.value.filter((item) => item.synced).length);
+const themeClass = computed(() => `theme-${uiTheme.value}`);
 const accountLabel = computed(() => {
   if (settings.value.offline_mode) return '离线模式';
   return settings.value.account_name || '未登录';
@@ -532,6 +569,23 @@ const webhookText = computed({
   get: () => settings.value.webhook_urls.join('\n'),
   set: (value: string) => { settings.value.webhook_urls = lines(value); }
 });
+
+function readStoredUiTheme(): UiTheme {
+  try {
+    return window.localStorage.getItem(uiThemeStorageKey) === 'black' ? 'black' : 'white';
+  } catch {
+    return 'white';
+  }
+}
+
+function setUiTheme(next: UiTheme) {
+  uiTheme.value = next;
+  try {
+    window.localStorage.setItem(uiThemeStorageKey, next);
+  } catch {
+    // Theme persistence is optional; the in-memory selection still applies.
+  }
+}
 
 onMounted(async () => {
   unlistenHistoryChanged = await listen('clipboard-history-changed', () => {

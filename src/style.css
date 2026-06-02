@@ -36,12 +36,178 @@
     font: inherit;
   }
 
+  select {
+    appearance: none;
+    -webkit-appearance: none;
+    background-color: #ffffff;
+    background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none'%3e%3cpath d='M6 8l4 4 4-4' stroke='%23475569' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3e%3c/svg%3e");
+    background-position: right 0.7rem center;
+    background-repeat: no-repeat;
+    background-size: 1rem;
+    color: #334155;
+    color-scheme: light;
+    padding-right: 2.25rem;
+  }
+
+  select::-ms-expand {
+    display: none;
+  }
+
+  select option {
+    background: #ffffff;
+    color: #0f172a;
+  }
+
   button {
     cursor: pointer;
   }
 
   button:disabled {
     cursor: not-allowed;
+  }
+}
+
+@layer components {
+  .theme-black {
+    background: #050505 !important;
+    color: #e5e7eb;
+    color-scheme: dark;
+  }
+
+  .theme-black .bg-white,
+  .theme-black [class*="bg-[#fbfbfc]"],
+  .theme-black [class*="bg-[#f6f7f8]"],
+  .theme-black [class*="bg-[#f5f6f7]"] {
+    background-color: #101010 !important;
+  }
+
+  .theme-black .bg-slate-50,
+  .theme-black .bg-slate-100 {
+    background-color: #181818 !important;
+  }
+
+  .theme-black .border-slate-200,
+  .theme-black .border-slate-300 {
+    border-color: #2b2b2b !important;
+  }
+
+  .theme-black .ring-slate-200 {
+    --tw-ring-color: #2b2b2b !important;
+  }
+
+  .theme-black .shadow-sm {
+    --tw-shadow-color: rgb(0 0 0 / 0.45);
+  }
+
+  .theme-black .text-slate-950,
+  .theme-black .text-slate-900,
+  .theme-black .text-slate-800,
+  .theme-black .text-slate-700 {
+    color: #f1f5f9 !important;
+  }
+
+  .theme-black .text-slate-600,
+  .theme-black .text-slate-500 {
+    color: #a1a1aa !important;
+  }
+
+  .theme-black .text-slate-400 {
+    color: #71717a !important;
+  }
+
+  .theme-black .bg-slate-950 {
+    background-color: #f5f5f5 !important;
+    color: #050505 !important;
+  }
+
+  .theme-black .hover\:bg-slate-800:hover {
+    background-color: #e5e5e5 !important;
+    color: #050505 !important;
+  }
+
+  .theme-black .hover\:bg-white:hover,
+  .theme-black .hover\:bg-slate-50:hover {
+    background-color: #1f1f1f !important;
+  }
+
+  .theme-black input,
+  .theme-black textarea,
+  .theme-black select {
+    background-color: #0b0b0b !important;
+    border-color: #2b2b2b !important;
+    color: #f1f5f9 !important;
+  }
+
+  .theme-black input::placeholder,
+  .theme-black textarea::placeholder {
+    color: #71717a !important;
+  }
+
+  .theme-black select {
+    background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none'%3e%3cpath d='M6 8l4 4 4-4' stroke='%23d4d4d8' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3e%3c/svg%3e");
+    color-scheme: dark;
+  }
+
+  .theme-black select option {
+    background: #0b0b0b;
+    color: #f1f5f9;
+  }
+
+  .theme-black .bg-blue-50 {
+    background-color: #0b1d35 !important;
+  }
+
+  .theme-black .text-blue-600,
+  .theme-black .text-blue-700 {
+    color: #60a5fa !important;
+  }
+
+  .theme-black .border-blue-500 {
+    border-color: #60a5fa !important;
+  }
+
+  .theme-black .ring-blue-100 {
+    --tw-ring-color: rgb(96 165 250 / 0.28) !important;
+  }
+
+  .theme-black .bg-emerald-50 {
+    background-color: #062519 !important;
+  }
+
+  .theme-black .text-emerald-600,
+  .theme-black .text-emerald-700 {
+    color: #34d399 !important;
+  }
+
+  .theme-black .bg-amber-50 {
+    background-color: #2a1a05 !important;
+  }
+
+  .theme-black .text-amber-600,
+  .theme-black .text-amber-700 {
+    color: #fbbf24 !important;
+  }
+
+  .theme-black .bg-red-50 {
+    background-color: #2a0d0d !important;
+  }
+
+  .theme-black .border-red-200 {
+    border-color: #7f1d1d !important;
+  }
+
+  .theme-black .text-red-700,
+  .theme-black .text-red-800,
+  .theme-black .text-red-900 {
+    color: #fca5a5 !important;
+  }
+
+  .theme-black .hover\:bg-red-100:hover {
+    background-color: #3b1111 !important;
+  }
+
+  .theme-black .text-violet-600 {
+    color: #a78bfa !important;
   }
 }
 

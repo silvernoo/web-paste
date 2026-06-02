@@ -30,7 +30,7 @@ jobs:
             binary_name: Web Paste.exe
             binary_subdir: release
           - name: macos-x64
-            runner: macos-13
+            runner: macos-15-intel
             target: x86_64-apple-darwin
             artifact_name: Web-Paste_macos_x64
             binary_name: Web Paste

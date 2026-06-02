@@ -96,7 +96,24 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release-assets
-          cp "src-tauri/target/${{ matrix.target }}/${{ matrix.binary_subdir }}/${{ matrix.binary_name }}" "release-assets/${{ matrix.artifact_name }}"
+          binary=""
+          for candidate in \
+            "src-tauri/target/${{ matrix.target }}/${{ matrix.binary_subdir }}/${{ matrix.binary_name }}" \
+            "src-tauri/target/${{ matrix.binary_subdir }}/${{ matrix.binary_name }}"
+          do
+            if [ -f "$candidate" ]; then
+              binary="$candidate"
+              break
+            fi
+          done
+
+          if [ -z "$binary" ]; then
+            echo "Executable not found. Built files under src-tauri/target:"
+            find src-tauri/target -maxdepth 4 -type f | sort
+            exit 1
+          fi
+
+          cp "$binary" "release-assets/${{ matrix.artifact_name }}"
           chmod +x "release-assets/${{ matrix.artifact_name }}"
 
       - name: Upload build artifact

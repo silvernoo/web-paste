@@ -1,0 +1,27 @@
+{
+  "name": "web-paste-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0 --port 1420",
+    "tauri:dev": "tauri dev",
+    "build": "vite build",
+    "tauri:build": "tauri build"
+  },
+  "dependencies": {
+    "@lucide/vue": "^1.17.0",
+    "@tauri-apps/api": "^1.6.0",
+    "@tauri-apps/cli": "^1.6.3",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7",
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.0",
+    "autoprefixer": "^10.5.0",
+    "postcss": "^8.5.15",
+    "tailwindcss": "^4.3.0"
+  }
+}

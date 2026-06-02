@@ -1,0 +1,30 @@
+[package]
+name = "web-paste-desktop"
+version = "0.1.0"
+description = "Web Paste desktop clipboard sync client"
+authors = ["DangoLabs"]
+license = "MIT"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "1.5", features = [] }
+
+[dependencies]
+anyhow = "1.0"
+arboard = "3.4"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5.0"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+regex = "1.11"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tauri = { version = "1.6", features = [ "system-tray", "api-all", "icon-ico", "icon-png"] }
+tokio = { version = "1.42", features = ["time"] }
+uuid = { version = "1.11", features = ["v4"] }
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]

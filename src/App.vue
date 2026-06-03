@@ -49,6 +49,15 @@
                 离线模式
               </button>
             </div>
+
+            <div class="flex flex-wrap gap-3 border-t border-slate-100 pt-4 text-sm font-bold">
+              <button class="bg-transparent p-0 text-blue-700 hover:text-blue-900 disabled:opacity-60" type="button" :disabled="authLoading" @click="openWebAuth('register')">
+                前往 Web 端注册
+              </button>
+              <button class="bg-transparent p-0 text-slate-600 hover:text-slate-950 disabled:opacity-60" type="button" :disabled="authLoading" @click="openWebAuth('forgot-password')">
+                忘记密码
+              </button>
+            </div>
           </form>
 
           <aside class="border-l border-slate-200 bg-slate-50 p-6">
@@ -395,6 +404,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { confirm } from '@tauri-apps/api/dialog';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { open } from '@tauri-apps/api/shell';
 import { invoke } from '@tauri-apps/api/tauri';
 import {
   AlertCircle,
@@ -462,6 +472,7 @@ type Notice = {
 type UiTheme = 'white' | 'black';
 
 const defaultApiBase = 'https://paste-api.dangolabs.top';
+const defaultWebBase = (import.meta.env.VITE_WEB_BASE_URL || 'https://paste.dangolabs.top').replace(/\/$/, '');
 const uiThemeStorageKey = 'web-paste-ui-theme';
 
 const settings = ref<ClientSettings>({
@@ -638,6 +649,15 @@ async function login() {
     errorMessage.value = messageFromError(err, '登录失败');
   } finally {
     authLoading.value = false;
+  }
+}
+
+async function openWebAuth(path: 'register' | 'forgot-password') {
+  errorMessage.value = '';
+  try {
+    await open(`${defaultWebBase}/${path}`);
+  } catch (err) {
+    errorMessage.value = messageFromError(err, '无法打开浏览器');
   }
 }
 

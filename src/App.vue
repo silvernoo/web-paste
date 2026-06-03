@@ -23,10 +23,6 @@
 
             <div class="grid gap-3">
               <label class="grid gap-1.5">
-                <span class="text-xs font-bold text-slate-500">服务端</span>
-                <input v-model.trim="loginForm.api_base" class="h-10 rounded-md border border-slate-200 bg-white px-3 text-sm font-medium outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" />
-              </label>
-              <label class="grid gap-1.5">
                 <span class="text-xs font-bold text-slate-500">用户名</span>
                 <input v-model.trim="loginForm.username" autocomplete="username" class="h-10 rounded-md border border-slate-200 bg-white px-3 text-sm font-medium outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" />
               </label>
@@ -52,7 +48,7 @@
 
             <div class="flex flex-wrap gap-3 border-t border-slate-100 pt-4 text-sm font-bold">
               <button class="bg-transparent p-0 text-blue-700 hover:text-blue-900 disabled:opacity-60" type="button" :disabled="authLoading" @click="openWebAuth('register')">
-                前往 Web 端注册
+                注册
               </button>
               <button class="bg-transparent p-0 text-slate-600 hover:text-slate-950 disabled:opacity-60" type="button" :disabled="authLoading" @click="openWebAuth('forgot-password')">
                 忘记密码
@@ -335,6 +331,13 @@
                       <button class="h-10 rounded-md border border-slate-200 bg-white px-3 text-sm font-bold text-slate-600 hover:bg-slate-50" type="button" @click="resetShortcut">默认</button>
                     </div>
                   </div>
+                  <label class="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
+                    <span class="min-w-0">
+                      <span class="block text-sm font-bold text-slate-950">登录时启动</span>
+                      <span class="mt-1 block text-xs font-medium text-slate-500">开机登录系统后自动启动 Web Paste</span>
+                    </span>
+                    <input v-model="settings.start_on_login" class="h-4 w-4 shrink-0 accent-slate-950" type="checkbox" />
+                  </label>
                 </div>
               </section>
 
@@ -354,34 +357,22 @@
                   </label>
                   <label class="grid gap-1.5">
                     <span class="text-xs font-bold text-slate-500">应用列表</span>
-                    <textarea v-model="appRulesText" rows="3" class="resize-y rounded-md border border-slate-200 bg-white p-3 text-sm font-medium leading-5 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" />
+                    <textarea v-model="appRulesDraft" rows="3" class="resize-y rounded-md border border-slate-200 bg-white p-3 text-sm font-medium leading-5 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" @blur="applyTextSettingsNow" />
                   </label>
                   <label class="grid gap-1.5">
                     <span class="text-xs font-bold text-slate-500">脱敏正则</span>
-                    <textarea v-model="maskRulesText" rows="4" class="resize-y rounded-md border border-slate-200 bg-white p-3 font-mono text-xs leading-5 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" />
+                    <textarea v-model="maskRulesDraft" rows="3" class="resize-y rounded-md border border-slate-200 bg-white p-3 font-mono text-xs leading-5 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" @blur="applyTextSettingsNow" />
+                    <span class="text-xs font-medium leading-5 text-slate-500">每行一条正则；命中内容会替换为等长星号。默认示例用于手机号脱敏。</span>
                   </label>
                 </div>
               </section>
 
-              <section class="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-4">
-                <div class="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-                  <div class="mb-4 flex items-center gap-2">
-                    <Globe2 :size="18" class="text-blue-600" />
-                    <h2 class="text-sm font-bold text-slate-950">服务端</h2>
-                  </div>
-                  <label class="grid gap-1.5">
-                    <span class="text-xs font-bold text-slate-500">地址</span>
-                    <input v-model.trim="settings.api_base" class="h-10 rounded-md border border-slate-200 bg-white px-3 text-sm font-medium outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" />
-                  </label>
+              <section class="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+                <div class="mb-4 flex items-center gap-2">
+                  <Webhook :size="18" class="text-amber-600" />
+                  <h2 class="text-sm font-bold text-slate-950">Webhook</h2>
                 </div>
-
-                <div class="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-                  <div class="mb-4 flex items-center gap-2">
-                    <Webhook :size="18" class="text-amber-600" />
-                    <h2 class="text-sm font-bold text-slate-950">Webhook</h2>
-                  </div>
-                  <textarea v-model="webhookText" rows="4" class="w-full resize-y rounded-md border border-slate-200 bg-white p-3 text-sm font-medium leading-5 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" />
-                </div>
+                <textarea v-model="webhookDraft" rows="4" class="w-full resize-y rounded-md border border-slate-200 bg-white p-3 text-sm font-medium leading-5 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" @blur="applyTextSettingsNow" />
               </section>
             </div>
           </section>
@@ -415,7 +406,6 @@ import {
   Database,
   File as FileIcon,
   FileText,
-  Globe2,
   HardDrive,
   Image as ImageIcon,
   LoaderCircle,
@@ -450,6 +440,7 @@ interface ClientSettings {
   mask_rules: string[];
   webhook_urls: string[];
   global_shortcut: string;
+  start_on_login: boolean;
 }
 
 interface LocalItem {
@@ -487,13 +478,13 @@ const settings = ref<ClientSettings>({
   paused: false,
   privacy_mode: 'off',
   app_rules: [],
-  mask_rules: ['(\\d{3})\\d{4}(\\d{4})', '\\b\\d{16,19}\\b'],
+  mask_rules: ['\\b1[3-9]\\d{9}\\b'],
   webhook_urls: [],
-  global_shortcut: 'CommandOrControl+Shift+V'
+  global_shortcut: 'CommandOrControl+Shift+V',
+  start_on_login: false
 });
 
 const loginForm = ref({
-  api_base: defaultApiBase,
   username: '',
   password: ''
 });
@@ -515,17 +506,23 @@ const errorMessage = ref('');
 const notice = ref<Notice | null>(null);
 const uiTheme = ref<UiTheme>(readStoredUiTheme());
 const shortcutRecording = ref(false);
+const appRulesDraft = ref('');
+const maskRulesDraft = ref('');
+const webhookDraft = ref('');
 const imagePreviewUrls = ref(new Map<string, string>());
 const imagePreviewFailedIds = ref(new Set<string>());
 const imagePreviewLoadingIds = new Set<string>();
+let imagePreviewQueue = Promise.resolve();
 let searchTimer = 0;
 let noticeTimer = 0;
 let historyReloadTimer = 0;
 let settingsSaveTimer = 0;
+let textSettingsTimer = 0;
 let lastSavedSettingsSnapshot = settingsSnapshot(settingsForSave());
 let settingsSaveRequestActive = false;
 let unlistenHistoryChanged: UnlistenFn | null = null;
 let unlistenShowMain: UnlistenFn | null = null;
+let syncingTextDrafts = false;
 const isMacPlatform = /mac/i.test(navigator.platform);
 
 const paused = computed(() => settings.value.paused);
@@ -555,18 +552,6 @@ const filteredHistory = computed(() => {
   if (!typeFilter.value) return history.value;
   return history.value.filter((item) => item.item_type === typeFilter.value);
 });
-const appRulesText = computed({
-  get: () => settings.value.app_rules.join('\n'),
-  set: (value: string) => { settings.value.app_rules = lines(value); }
-});
-const maskRulesText = computed({
-  get: () => settings.value.mask_rules.join('\n'),
-  set: (value: string) => { settings.value.mask_rules = lines(value); }
-});
-const webhookText = computed({
-  get: () => settings.value.webhook_urls.join('\n'),
-  set: (value: string) => { settings.value.webhook_urls = lines(value); }
-});
 
 watch(
   settings,
@@ -576,6 +561,11 @@ watch(
   },
   { deep: true }
 );
+
+watch([appRulesDraft, maskRulesDraft, webhookDraft], () => {
+  if (!initialized.value || syncingTextDrafts) return;
+  scheduleTextSettingsApply();
+});
 
 function readStoredUiTheme(): UiTheme {
   try {
@@ -612,6 +602,7 @@ onBeforeUnmount(() => {
   window.clearTimeout(noticeTimer);
   window.clearTimeout(historyReloadTimer);
   window.clearTimeout(settingsSaveTimer);
+  window.clearTimeout(textSettingsTimer);
   unlistenHistoryChanged?.();
   unlistenHistoryChanged = null;
   unlistenShowMain?.();
@@ -623,7 +614,6 @@ async function loadInitial() {
   errorMessage.value = '';
   try {
     applyPersistedSettings(await invoke<ClientSettings>('get_client_settings'));
-    loginForm.value.api_base = settings.value.api_base || defaultApiBase;
     if (!needsOnboarding.value) await loadHistory();
   } catch (err) {
     errorMessage.value = messageFromError(err, '加载桌面端配置失败');
@@ -637,7 +627,6 @@ async function login() {
   errorMessage.value = '';
   try {
     applyPersistedSettings(await invoke<ClientSettings>('login_with_password', {
-      apiBase: loginForm.value.api_base,
       username: loginForm.value.username,
       password: loginForm.value.password
     }));
@@ -680,7 +669,6 @@ async function logout() {
   errorMessage.value = '';
   try {
     applyPersistedSettings(await invoke<ClientSettings>('logout_client'));
-    loginForm.value.api_base = settings.value.api_base || defaultApiBase;
     view.value = 'history';
     showNotice('success', '已退出登录');
   } catch (err) {
@@ -713,6 +701,20 @@ function scheduleSettingsSave(delay = 450) {
   settingsSaveTimer = window.setTimeout(() => {
     void saveSettingsNow();
   }, delay);
+}
+
+function scheduleTextSettingsApply(delay = 550) {
+  window.clearTimeout(textSettingsTimer);
+  textSettingsTimer = window.setTimeout(() => {
+    applyTextSettingsNow();
+  }, delay);
+}
+
+function applyTextSettingsNow() {
+  window.clearTimeout(textSettingsTimer);
+  settings.value.app_rules = lines(appRulesDraft.value);
+  settings.value.mask_rules = lines(maskRulesDraft.value);
+  settings.value.webhook_urls = lines(webhookDraft.value);
 }
 
 async function saveSettingsNow() {
@@ -931,18 +933,25 @@ function refreshImagePreviews() {
 async function loadImagePreview(item: LocalItem) {
   if (imagePreviewUrls.value.has(item.id) || imagePreviewFailedIds.value.has(item.id) || imagePreviewLoadingIds.has(item.id)) return;
   imagePreviewLoadingIds.add(item.id);
-  try {
-    const dataUrl = await invoke<string>('get_image_preview_data_url', { id: item.id });
-    const next = new Map(imagePreviewUrls.value);
-    next.set(item.id, dataUrl);
-    imagePreviewUrls.value = next;
-  } catch {
-    const failed = new Set(imagePreviewFailedIds.value);
-    failed.add(item.id);
-    imagePreviewFailedIds.value = failed;
-  } finally {
-    imagePreviewLoadingIds.delete(item.id);
-  }
+  imagePreviewQueue = imagePreviewQueue.finally(async () => {
+    if (!history.value.some((current) => current.id === item.id)) {
+      imagePreviewLoadingIds.delete(item.id);
+      return;
+    }
+    try {
+      const dataUrl = await invoke<string>('get_image_preview_data_url', { id: item.id });
+      const next = new Map(imagePreviewUrls.value);
+      next.set(item.id, dataUrl);
+      imagePreviewUrls.value = next;
+    } catch {
+      const failed = new Set(imagePreviewFailedIds.value);
+      failed.add(item.id);
+      imagePreviewFailedIds.value = failed;
+    } finally {
+      imagePreviewLoadingIds.delete(item.id);
+    }
+  });
+  await imagePreviewQueue;
 }
 
 function imagePreviewUrl(item: LocalItem) {
@@ -958,6 +967,7 @@ function clearImagePreviews() {
   imagePreviewUrls.value = new Map();
   imagePreviewFailedIds.value = new Set();
   imagePreviewLoadingIds.clear();
+  imagePreviewQueue = Promise.resolve();
 }
 
 function formatDate(value: string) {
@@ -977,9 +987,10 @@ function lines(value: string) {
 function normalizeSettings(next: ClientSettings): ClientSettings {
   return {
     ...next,
-    api_base: next.api_base || defaultApiBase,
+    api_base: defaultApiBase,
     account_name: next.account_name || '',
-    offline_mode: Boolean(next.offline_mode)
+    offline_mode: Boolean(next.offline_mode),
+    start_on_login: Boolean(next.start_on_login)
   };
 }
 
@@ -998,8 +1009,19 @@ function rememberPersistedSettings(next: ClientSettings = settings.value) {
   lastSavedSettingsSnapshot = settingsSnapshot(settingsForSave(next));
 }
 
+function syncTextDraftsFromSettings() {
+  syncingTextDrafts = true;
+  appRulesDraft.value = settings.value.app_rules.join('\n');
+  maskRulesDraft.value = settings.value.mask_rules.join('\n');
+  webhookDraft.value = settings.value.webhook_urls.join('\n');
+  queueMicrotask(() => {
+    syncingTextDrafts = false;
+  });
+}
+
 function applyPersistedSettings(next: ClientSettings) {
   settings.value = normalizeSettings(next);
+  syncTextDraftsFromSettings();
   rememberPersistedSettings();
 }
 

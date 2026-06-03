@@ -32,6 +32,7 @@ use uuid::Uuid;
 
 const SINGLE_INSTANCE_PORT: u16 = 45937;
 const SINGLE_INSTANCE_ACTIVATE_MESSAGE: &[u8] = b"web-paste:activate:v1";
+const DEFAULT_API_BASE: &str = "https://paste-api.dangolabs.top";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ClientSettings {
@@ -51,12 +52,14 @@ struct ClientSettings {
     mask_rules: Vec<String>,
     webhook_urls: Vec<String>,
     global_shortcut: String,
+    #[serde(default)]
+    start_on_login: bool,
 }
 
 impl Default for ClientSettings {
     fn default() -> Self {
         Self {
-            api_base: "https://paste-api.dangolabs.top".to_string(),
+            api_base: DEFAULT_API_BASE.to_string(),
             token: String::new(),
             device_id: String::new(),
             device_name: hostname(),
@@ -67,13 +70,10 @@ impl Default for ClientSettings {
             paused: false,
             privacy_mode: "off".to_string(),
             app_rules: vec![],
-            mask_rules: vec![
-                r"(\d{3})\d{4}(\d{4})".to_string(),
-                r"\b\d{16,19}\b".to_string(),
-                r"(?i)(token|secret|password)\s*[:=]\s*\S+".to_string(),
-            ],
+            mask_rules: default_mask_rules(),
             webhook_urls: vec![],
             global_shortcut: "CommandOrControl+Shift+V".to_string(),
+            start_on_login: false,
         }
     }
 }
@@ -233,6 +233,7 @@ fn start_single_instance_listener(listener: TcpListener, app: AppHandle) {
 }
 
 fn main() {
+    let start_hidden = std::env::args().any(|arg| arg == "--startup" || arg == "--hidden");
     let single_instance_guard = match acquire_single_instance() {
         Ok(Some(guard)) => guard,
         Ok(None) => return,
@@ -258,6 +259,11 @@ fn main() {
             init_db(&db_path)?;
             let settings = load_settings(&db_path)?;
             let global_shortcut = settings.global_shortcut.clone();
+            if settings.start_on_login {
+                if let Err(err) = apply_start_on_login(true) {
+                    eprintln!("apply start on login failed: {err}");
+                }
+            }
             let single_instance_listener = single_instance_guard
                 .listener
                 .try_clone()
@@ -273,6 +279,11 @@ fn main() {
             });
             app.manage(state.clone());
             start_single_instance_listener(single_instance_listener, app.handle());
+            if start_hidden {
+                if let Some(window) = app.get_window("main") {
+                    let _ = window.hide();
+                }
+            }
             if let Err(err) = register_shortcut(&app.handle(), &state, &global_shortcut) {
                 eprintln!("register shortcut failed: {err}");
             }
@@ -329,15 +340,11 @@ struct AuthDevice {
 #[tauri::command]
 async fn login_with_password(
     state: State<'_, Arc<AppState>>,
-    api_base: String,
     username: String,
     password: String,
 ) -> Result<ClientSettings, String> {
-    let api_base = api_base.trim().trim_end_matches('/').to_string();
+    let api_base = DEFAULT_API_BASE.to_string();
     let username = username.trim().to_string();
-    if api_base.is_empty() {
-        return Err("服务端地址不能为空".to_string());
-    }
     if username.is_empty() || password.is_empty() {
         return Err("用户名和密码不能为空".to_string());
     }
@@ -388,6 +395,7 @@ async fn login_with_password(
 #[tauri::command]
 fn use_offline_mode(state: State<'_, Arc<AppState>>) -> Result<ClientSettings, String> {
     let mut next = state.settings.lock().map_err(to_string)?.clone();
+    next.api_base = DEFAULT_API_BASE.to_string();
     next.offline_mode = true;
     next.token.clear();
     next.device_id.clear();
@@ -400,6 +408,7 @@ fn use_offline_mode(state: State<'_, Arc<AppState>>) -> Result<ClientSettings, S
 #[tauri::command]
 fn logout_client(state: State<'_, Arc<AppState>>) -> Result<ClientSettings, String> {
     let mut next = state.settings.lock().map_err(to_string)?.clone();
+    next.api_base = DEFAULT_API_BASE.to_string();
     next.offline_mode = false;
     next.token.clear();
     next.device_id.clear();
@@ -415,8 +424,13 @@ fn save_client_settings(
     state: State<'_, Arc<AppState>>,
     mut next: ClientSettings,
 ) -> Result<(), String> {
+    next.api_base = DEFAULT_API_BASE.to_string();
     next.global_shortcut = first_non_empty(&next.global_shortcut, "CommandOrControl+Shift+V");
     register_shortcut(&app, state.inner(), &next.global_shortcut).map_err(to_string)?;
+    let current_start_on_login = state.settings.lock().map_err(to_string)?.start_on_login;
+    if current_start_on_login != next.start_on_login {
+        apply_start_on_login(next.start_on_login).map_err(to_string)?;
+    }
     save_settings_to_db(&state.db_path, &next).map_err(to_string)?;
     state.paused.store(next.paused, Ordering::Relaxed);
     *state.settings.lock().map_err(to_string)? = next;
@@ -994,7 +1008,16 @@ fn apply_masks(input: &str, rules: &[String]) -> Result<(String, bool)> {
     for rule in rules {
         let regex = Regex::new(rule)?;
         if regex.is_match(&current) {
-            current = regex.replace_all(&current, "***").to_string();
+            current = regex
+                .replace_all(&current, |captures: &regex::Captures| {
+                    "*".repeat(
+                        captures
+                            .get(0)
+                            .map(|matched| matched.as_str().chars().count())
+                            .unwrap_or(0),
+                    )
+                })
+                .to_string();
             masked = true;
         }
     }
@@ -1316,13 +1339,49 @@ fn load_settings(db_path: &Path) -> Result<ClientSettings> {
         |row| row.get(0),
     );
     match loaded {
-        Ok(value) => Ok(serde_json::from_str(&value)?),
+        Ok(value) => {
+            let settings = normalize_client_settings(serde_json::from_str(&value)?);
+            save_settings_to_db(db_path, &settings)?;
+            Ok(settings)
+        }
         Err(_) => {
-            let settings = ClientSettings::default();
+            let settings = normalize_client_settings(ClientSettings::default());
             save_settings_to_db(db_path, &settings)?;
             Ok(settings)
         }
     }
+}
+
+fn normalize_client_settings(mut settings: ClientSettings) -> ClientSettings {
+    settings.api_base = DEFAULT_API_BASE.to_string();
+    settings.global_shortcut =
+        first_non_empty(&settings.global_shortcut, "CommandOrControl+Shift+V");
+    settings.poll_interval_ms = settings.poll_interval_ms.max(300);
+    if settings.mask_rules == legacy_default_mask_rules()
+        || settings.mask_rules == previous_default_mask_rules()
+    {
+        settings.mask_rules = default_mask_rules();
+    }
+    settings
+}
+
+fn default_mask_rules() -> Vec<String> {
+    vec![r"\b1[3-9]\d{9}\b".to_string()]
+}
+
+fn previous_default_mask_rules() -> Vec<String> {
+    vec![
+        r"\b1[3-9]\d{9}\b".to_string(),
+        r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b".to_string(),
+    ]
+}
+
+fn legacy_default_mask_rules() -> Vec<String> {
+    vec![
+        r"(\d{3})\d{4}(\d{4})".to_string(),
+        r"\b\d{16,19}\b".to_string(),
+        r"(?i)(token|secret|password)\s*[:=]\s*\S+".to_string(),
+    ]
 }
 
 fn save_settings_to_db(db_path: &Path, settings: &ClientSettings) -> Result<()> {
@@ -1337,6 +1396,131 @@ fn save_settings_to_db(db_path: &Path, settings: &ClientSettings) -> Result<()> 
         params![value],
     )?;
     Ok(())
+}
+
+fn apply_start_on_login(enabled: bool) -> Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        apply_windows_start_on_login(enabled)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        apply_macos_start_on_login(enabled)
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        apply_linux_start_on_login(enabled)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
+    {
+        let _ = enabled;
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn apply_windows_start_on_login(enabled: bool) -> Result<()> {
+    let key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+    let value_name = "Web Paste";
+    if enabled {
+        let exe = std::env::current_exe()?;
+        let command = format!("\"{}\" --startup", exe.display());
+        let status = std::process::Command::new("reg")
+            .args(["add", key, "/v", value_name, "/t", "REG_SZ", "/d"])
+            .arg(command)
+            .arg("/f")
+            .status()?;
+        if !status.success() {
+            return Err(anyhow!("could not enable Windows login startup"));
+        }
+    } else {
+        let _ = std::process::Command::new("reg")
+            .args(["delete", key, "/v", value_name, "/f"])
+            .status()?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn apply_macos_start_on_login(enabled: bool) -> Result<()> {
+    let path = dirs::home_dir()
+        .ok_or_else(|| anyhow!("could not resolve home directory"))?
+        .join("Library")
+        .join("LaunchAgents")
+        .join("com.dangolabs.webpaste.plist");
+    if enabled {
+        let exe = std::env::current_exe()?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let content = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.dangolabs.webpaste</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{}</string>
+    <string>--startup</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>
+"#,
+            xml_escape(&exe.to_string_lossy())
+        );
+        std::fs::write(path, content)?;
+    } else if path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn apply_linux_start_on_login(enabled: bool) -> Result<()> {
+    let path = dirs::config_dir()
+        .ok_or_else(|| anyhow!("could not resolve config directory"))?
+        .join("autostart")
+        .join("web-paste.desktop");
+    if enabled {
+        let exe = std::env::current_exe()?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let content = format!(
+            "[Desktop Entry]\nType=Application\nName=Web Paste\nExec={} --startup\nX-GNOME-Autostart-enabled=true\n",
+            desktop_exec_arg(&exe.to_string_lossy())
+        );
+        std::fs::write(path, content)?;
+    } else if path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn desktop_exec_arg(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || "/._-".contains(ch))
+    {
+        value.to_string()
+    } else {
+        format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+    }
 }
 
 fn app_data_dir() -> Result<PathBuf> {

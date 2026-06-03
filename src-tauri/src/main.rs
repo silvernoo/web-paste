@@ -3,12 +3,14 @@
 use std::{
     borrow::Cow,
     collections::VecDeque,
-    io::Cursor,
+    io::{Cursor, Read, Write},
+    net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
+    thread,
     time::Duration,
 };
 
@@ -27,6 +29,9 @@ use tauri::{
     SystemTrayMenu,
 };
 use uuid::Uuid;
+
+const SINGLE_INSTANCE_PORT: u16 = 45937;
+const SINGLE_INSTANCE_ACTIVATE_MESSAGE: &[u8] = b"web-paste:activate:v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ClientSettings {
@@ -89,13 +94,154 @@ struct LocalItem {
 struct AppState {
     db_path: PathBuf,
     data_dir: PathBuf,
+    #[allow(dead_code)]
+    single_instance_guard: SingleInstanceGuard,
     settings: Mutex<ClientSettings>,
     paused: AtomicBool,
     suppressed_hashes: Mutex<VecDeque<String>>,
     registered_shortcut: Mutex<Option<String>>,
 }
 
+struct SingleInstanceGuard {
+    listener: TcpListener,
+    #[cfg(target_os = "windows")]
+    _mutex: WindowsMutexGuard,
+}
+
+#[cfg(target_os = "windows")]
+struct WindowsMutexGuard {
+    handle: usize,
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for WindowsMutexGuard {
+    fn drop(&mut self) {
+        use std::ffi::c_void;
+
+        type Handle = *mut c_void;
+
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn CloseHandle(handle: Handle) -> i32;
+        }
+
+        unsafe {
+            CloseHandle(self.handle as Handle);
+        }
+    }
+}
+
+fn acquire_single_instance() -> Result<Option<SingleInstanceGuard>> {
+    #[cfg(target_os = "windows")]
+    let mutex = match acquire_windows_mutex() {
+        Ok(Some(mutex)) => mutex,
+        Ok(None) => {
+            activate_existing_instance();
+            return Ok(None);
+        }
+        Err(err) => return Err(err),
+    };
+
+    match TcpListener::bind(("127.0.0.1", SINGLE_INSTANCE_PORT)) {
+        Ok(listener) => {
+            listener.set_nonblocking(true)?;
+            Ok(Some(SingleInstanceGuard {
+                listener,
+                #[cfg(target_os = "windows")]
+                _mutex: mutex,
+            }))
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
+            activate_existing_instance();
+            Ok(None)
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn acquire_windows_mutex() -> Result<Option<WindowsMutexGuard>> {
+    use std::{ffi::c_void, os::windows::ffi::OsStrExt};
+
+    type Handle = *mut c_void;
+
+    const ERROR_ALREADY_EXISTS: u32 = 183;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn CreateMutexW(
+            security_attributes: *mut c_void,
+            initial_owner: i32,
+            name: *const u16,
+        ) -> Handle;
+        fn GetLastError() -> u32;
+        fn CloseHandle(handle: Handle) -> i32;
+    }
+
+    let name: Vec<u16> = std::ffi::OsStr::new("Local\\WebPasteSingleInstance")
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    unsafe {
+        let handle = CreateMutexW(std::ptr::null_mut(), 1, name.as_ptr());
+        if handle.is_null() {
+            return Err(anyhow!("CreateMutexW failed"));
+        }
+        if GetLastError() == ERROR_ALREADY_EXISTS {
+            CloseHandle(handle);
+            Ok(None)
+        } else {
+            Ok(Some(WindowsMutexGuard {
+                handle: handle as usize,
+            }))
+        }
+    }
+}
+
+fn activate_existing_instance() {
+    if let Ok(mut stream) = TcpStream::connect(("127.0.0.1", SINGLE_INSTANCE_PORT)) {
+        let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+        let _ = stream.write_all(SINGLE_INSTANCE_ACTIVATE_MESSAGE);
+        let _ = stream.flush();
+    }
+}
+
+fn start_single_instance_listener(listener: TcpListener, app: AppHandle) {
+    thread::spawn(move || loop {
+        match listener.accept() {
+            Ok((mut stream, _)) => {
+                let mut buffer = [0u8; 64];
+                if let Ok(size) = stream.read(&mut buffer) {
+                    if &buffer[..size] == SINGLE_INSTANCE_ACTIVATE_MESSAGE {
+                        let app = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            open_main_window_with_view(&app, "history");
+                        });
+                    }
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(200));
+            }
+            Err(err) => {
+                eprintln!("single instance listener failed: {err}");
+                thread::sleep(Duration::from_secs(1));
+            }
+        }
+    });
+}
+
 fn main() {
+    let single_instance_guard = match acquire_single_instance() {
+        Ok(Some(guard)) => guard,
+        Ok(None) => return,
+        Err(err) => {
+            eprintln!("single instance check failed: {err}");
+            return;
+        }
+    };
+
     let tray_menu = SystemTrayMenu::new()
         .add_item(CustomMenuItem::new("open".to_string(), "打开主界面"))
         .add_item(CustomMenuItem::new("pause".to_string(), "暂停监听"))
@@ -105,22 +251,28 @@ fn main() {
 
     tauri::Builder::default()
         .system_tray(SystemTray::new().with_menu(tray_menu))
-        .setup(|app| {
+        .setup(move |app| {
             let data_dir = app_data_dir()?;
             std::fs::create_dir_all(data_dir.join("images"))?;
             let db_path = data_dir.join("web-paste.sqlite3");
             init_db(&db_path)?;
             let settings = load_settings(&db_path)?;
             let global_shortcut = settings.global_shortcut.clone();
+            let single_instance_listener = single_instance_guard
+                .listener
+                .try_clone()
+                .context("clone single instance listener")?;
             let state = Arc::new(AppState {
                 db_path,
                 data_dir,
+                single_instance_guard,
                 paused: AtomicBool::new(settings.paused),
                 settings: Mutex::new(settings),
                 suppressed_hashes: Mutex::new(VecDeque::new()),
                 registered_shortcut: Mutex::new(None),
             });
             app.manage(state.clone());
+            start_single_instance_listener(single_instance_listener, app.handle());
             if let Err(err) = register_shortcut(&app.handle(), &state, &global_shortcut) {
                 eprintln!("register shortcut failed: {err}");
             }
@@ -278,7 +430,9 @@ fn set_paused(state: State<'_, Arc<AppState>>, paused: bool) -> Result<(), Strin
 
 #[tauri::command]
 async fn force_sync(state: State<'_, Arc<AppState>>) -> Result<bool, String> {
-    force_sync_inner(state.inner().clone()).await.map_err(to_string)
+    force_sync_inner(state.inner().clone())
+        .await
+        .map_err(to_string)
 }
 
 #[tauri::command]
@@ -328,7 +482,10 @@ fn get_history(
 }
 
 #[tauri::command]
-fn get_image_preview_data_url(state: State<'_, Arc<AppState>>, id: String) -> Result<String, String> {
+fn get_image_preview_data_url(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<String, String> {
     let conn = Connection::open(&state.db_path).map_err(to_string)?;
     let (item_type, object_path, mime_type) = conn
         .query_row(
@@ -349,7 +506,11 @@ fn get_image_preview_data_url(state: State<'_, Arc<AppState>>, id: String) -> Re
 
     let path = PathBuf::from(object_path.ok_or_else(|| "image path is empty".to_string())?);
     let canonical = path.canonicalize().map_err(to_string)?;
-    let images_dir = state.data_dir.join("images").canonicalize().map_err(to_string)?;
+    let images_dir = state
+        .data_dir
+        .join("images")
+        .canonicalize()
+        .map_err(to_string)?;
     if !canonical.starts_with(images_dir) {
         return Err("image path is outside app data directory".to_string());
     }
@@ -359,7 +520,8 @@ fn get_image_preview_data_url(state: State<'_, Arc<AppState>>, id: String) -> Re
         Ok(image) => {
             let thumb = image.thumbnail(320, 240);
             let mut out = Cursor::new(Vec::new());
-            thumb.write_to(&mut out, image::ImageFormat::Png)
+            thumb
+                .write_to(&mut out, image::ImageFormat::Png)
                 .map_err(to_string)?;
             mime = "image/png".to_string();
             out.into_inner()
@@ -404,12 +566,14 @@ fn recopy_item(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String
         }
         "file_path" => {
             let value = item.2.unwrap_or_default();
-            suppress_clipboard_hash(state.inner(), hash_bytes(value.as_bytes())).map_err(to_string)?;
+            suppress_clipboard_hash(state.inner(), hash_bytes(value.as_bytes()))
+                .map_err(to_string)?;
             clipboard.set_text(value).map_err(to_string)?;
         }
         _ => {
             let value = item.1.unwrap_or_default();
-            suppress_clipboard_hash(state.inner(), hash_bytes(value.as_bytes())).map_err(to_string)?;
+            suppress_clipboard_hash(state.inner(), hash_bytes(value.as_bytes()))
+                .map_err(to_string)?;
             clipboard.set_text(value).map_err(to_string)?;
         }
     }
@@ -419,7 +583,8 @@ fn recopy_item(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String
 #[tauri::command]
 fn clear_history(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     let conn = Connection::open(&state.db_path).map_err(to_string)?;
-    conn.execute("DELETE FROM local_items", []).map_err(to_string)?;
+    conn.execute("DELETE FROM local_items", [])
+        .map_err(to_string)?;
     let images_dir = state.data_dir.join("images");
     if images_dir.exists() {
         std::fs::remove_dir_all(&images_dir).map_err(to_string)?;
@@ -438,7 +603,11 @@ async fn clipboard_loop(state: Arc<AppState>, app: AppHandle) {
     };
     let mut last_hash = String::new();
     loop {
-        let settings = state.settings.lock().map(|value| value.clone()).unwrap_or_default();
+        let settings = state
+            .settings
+            .lock()
+            .map(|value| value.clone())
+            .unwrap_or_default();
         if state.paused.load(Ordering::Relaxed) || !app_allowed(&settings) {
             if let Some(hash) = current_clipboard_hash(&mut clipboard) {
                 last_hash = hash.clone();
@@ -527,7 +696,11 @@ async fn sync_loop(state: Arc<AppState>, app: AppHandle) {
     }
 }
 
-async fn persist_text(state: &Arc<AppState>, settings: &ClientSettings, text: String) -> Result<()> {
+async fn persist_text(
+    state: &Arc<AppState>,
+    settings: &ClientSettings,
+    text: String,
+) -> Result<()> {
     let source_app = active_process_name();
     let (content, masked) = apply_masks(&text, &settings.mask_rules)?;
     let (item_type, content, file_path) = if let Some(path) = detect_file_path(&content) {
@@ -536,14 +709,7 @@ async fn persist_text(state: &Arc<AppState>, settings: &ClientSettings, text: St
         ("text".to_string(), Some(content), None)
     };
     let item = insert_local_item(
-        state,
-        item_type,
-        content,
-        file_path,
-        None,
-        None,
-        source_app,
-        masked,
+        state, item_type, content, file_path, None, None, source_app, masked,
     )?;
     trigger_webhooks(settings, &item).await;
     let _ = force_sync_inner(state.clone()).await;
@@ -645,7 +811,11 @@ fn insert_local_item(
 }
 
 async fn force_sync_inner(state: Arc<AppState>) -> Result<bool> {
-    let settings = state.settings.lock().map_err(|_| anyhow!("settings lock poisoned"))?.clone();
+    let settings = state
+        .settings
+        .lock()
+        .map_err(|_| anyhow!("settings lock poisoned"))?
+        .clone();
     if settings.offline_mode
         || settings.token.trim().is_empty()
         || settings.api_base.trim().is_empty()
@@ -676,7 +846,9 @@ async fn force_sync_inner(state: Arc<AppState>) -> Result<bool> {
             let bytes = std::fs::read(path)?;
             record["image_base64"] = json!(format!(
                 "data:{};base64,{}",
-                item.mime_type.clone().unwrap_or_else(|| "image/png".to_string()),
+                item.mime_type
+                    .clone()
+                    .unwrap_or_else(|| "image/png".to_string()),
                 BASE64.encode(bytes)
             ));
         }
@@ -701,7 +873,11 @@ async fn force_sync_inner(state: Arc<AppState>) -> Result<bool> {
         .map(|items| {
             items
                 .iter()
-                .filter_map(|item| item.get("id").and_then(|id| id.as_str()).map(str::to_string))
+                .filter_map(|item| {
+                    item.get("id")
+                        .and_then(|id| id.as_str())
+                        .map(str::to_string)
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -746,7 +922,10 @@ fn mark_synced(db_path: &Path, ids: &[String]) -> Result<()> {
     }
     let conn = Connection::open(db_path)?;
     for id in ids {
-        conn.execute("UPDATE local_items SET synced = 1 WHERE id = ?1", params![id])?;
+        conn.execute(
+            "UPDATE local_items SET synced = 1 WHERE id = ?1",
+            params![id],
+        )?;
     }
     Ok(())
 }
@@ -910,8 +1089,7 @@ fn clipboard_file_paths() -> Option<String> {
                     continue;
                 }
                 let mut buffer = vec![0u16; len as usize + 1];
-                let written =
-                    DragQueryFileW(handle as Hdrop, index, buffer.as_mut_ptr(), len + 1);
+                let written = DragQueryFileW(handle as Hdrop, index, buffer.as_mut_ptr(), len + 1);
                 if written == 0 {
                     continue;
                 }
@@ -1012,7 +1190,10 @@ fn command_output(cmd: &str, args: &[&str]) -> Option<String> {
 }
 
 fn set_paused_inner(state: &Arc<AppState>, paused: bool) -> Result<()> {
-    let mut settings = state.settings.lock().map_err(|_| anyhow!("settings lock poisoned"))?;
+    let mut settings = state
+        .settings
+        .lock()
+        .map_err(|_| anyhow!("settings lock poisoned"))?;
     settings.paused = paused;
     save_settings_to_db(&state.db_path, &settings)?;
     state.paused.store(paused, Ordering::Relaxed);
@@ -1029,7 +1210,11 @@ fn handle_tray_event(app: &AppHandle, event: SystemTrayEvent) {
                 let state = app.state::<Arc<AppState>>();
                 let paused = !state.paused.load(Ordering::Relaxed);
                 if set_paused_inner(&state, paused).is_ok() {
-                    let title = if paused { "恢复监听" } else { "暂停监听" };
+                    let title = if paused {
+                        "恢复监听"
+                    } else {
+                        "暂停监听"
+                    };
                     let _ = app.tray_handle().get_item("pause").set_title(title);
                 }
             }
@@ -1207,7 +1392,12 @@ fn first_non_empty(value: &str, fallback: &str) -> String {
 fn error_message_from_body(body: &str, fallback: &str) -> String {
     serde_json::from_str::<serde_json::Value>(body)
         .ok()
-        .and_then(|value| value.get("error").and_then(|error| error.as_str()).map(str::to_string))
+        .and_then(|value| {
+            value
+                .get("error")
+                .and_then(|error| error.as_str())
+                .map(str::to_string)
+        })
         .filter(|message| !message.trim().is_empty())
         .unwrap_or_else(|| fallback.to_string())
 }

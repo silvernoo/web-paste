@@ -10,11 +10,6 @@
     <section v-else-if="needsOnboarding" class="grid min-h-screen place-items-center px-8 py-6">
       <div class="grid w-full max-w-[980px] overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
         <div class="flex h-12 items-center justify-between border-b border-slate-200 bg-slate-50 px-4">
-          <div class="flex items-center gap-2">
-            <span class="h-3 w-3 rounded-full bg-[#ff5f57]"></span>
-            <span class="h-3 w-3 rounded-full bg-[#ffbd2e]"></span>
-            <span class="h-3 w-3 rounded-full bg-[#28c840]"></span>
-          </div>
           <div class="text-sm font-bold text-slate-700">Web Paste Desktop</div>
           <div class="w-[52px]"></div>
         </div>
@@ -84,11 +79,6 @@
       <div class="mx-auto grid h-[calc(100vh-32px)] max-w-[1240px] grid-cols-[184px_minmax(0,1fr)] overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm lg:grid-cols-[220px_minmax(0,1fr)]">
         <aside class="flex min-h-0 flex-col border-r border-slate-200 bg-[#fbfbfc]">
           <div class="border-b border-slate-200 px-4 py-4">
-            <div class="mb-4 flex items-center gap-2">
-              <span class="h-3 w-3 rounded-full bg-[#ff5f57]"></span>
-              <span class="h-3 w-3 rounded-full bg-[#ffbd2e]"></span>
-              <span class="h-3 w-3 rounded-full bg-[#28c840]"></span>
-            </div>
             <div class="flex items-center gap-3">
               <div class="grid h-9 w-9 place-items-center rounded-lg bg-slate-950 text-xs font-bold text-white">WP</div>
               <div class="min-w-0">
@@ -144,11 +134,6 @@
                 <LoaderCircle v-if="syncing" :size="16" class="animate-spin" />
                 <RefreshCw v-else :size="16" />
                 同步
-              </button>
-              <button v-if="view === 'settings'" class="inline-flex h-9 items-center gap-2 rounded-md bg-slate-950 px-3 text-sm font-bold text-white hover:bg-slate-800 disabled:opacity-60" type="button" :disabled="saving" @click="save">
-                <LoaderCircle v-if="saving" :size="16" class="animate-spin" />
-                <Save v-else :size="16" />
-                保存
               </button>
             </div>
           </header>
@@ -407,7 +392,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { confirm } from '@tauri-apps/api/dialog';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/tauri';
@@ -431,7 +416,6 @@ import {
   Pause,
   Play,
   RefreshCw,
-  Save,
   Search,
   Settings,
   ShieldCheck,
@@ -526,6 +510,9 @@ const imagePreviewLoadingIds = new Set<string>();
 let searchTimer = 0;
 let noticeTimer = 0;
 let historyReloadTimer = 0;
+let settingsSaveTimer = 0;
+let lastSavedSettingsSnapshot = settingsSnapshot(settingsForSave());
+let settingsSaveRequestActive = false;
 let unlistenHistoryChanged: UnlistenFn | null = null;
 let unlistenShowMain: UnlistenFn | null = null;
 const isMacPlatform = /mac/i.test(navigator.platform);
@@ -570,6 +557,15 @@ const webhookText = computed({
   set: (value: string) => { settings.value.webhook_urls = lines(value); }
 });
 
+watch(
+  settings,
+  () => {
+    if (!initialized.value || needsOnboarding.value) return;
+    scheduleSettingsSave();
+  },
+  { deep: true }
+);
+
 function readStoredUiTheme(): UiTheme {
   try {
     return window.localStorage.getItem(uiThemeStorageKey) === 'black' ? 'black' : 'white';
@@ -604,6 +600,7 @@ onBeforeUnmount(() => {
   window.clearTimeout(searchTimer);
   window.clearTimeout(noticeTimer);
   window.clearTimeout(historyReloadTimer);
+  window.clearTimeout(settingsSaveTimer);
   unlistenHistoryChanged?.();
   unlistenHistoryChanged = null;
   unlistenShowMain?.();
@@ -614,7 +611,7 @@ onBeforeUnmount(() => {
 async function loadInitial() {
   errorMessage.value = '';
   try {
-    settings.value = normalizeSettings(await invoke<ClientSettings>('get_client_settings'));
+    applyPersistedSettings(await invoke<ClientSettings>('get_client_settings'));
     loginForm.value.api_base = settings.value.api_base || defaultApiBase;
     if (!needsOnboarding.value) await loadHistory();
   } catch (err) {
@@ -628,7 +625,7 @@ async function login() {
   authLoading.value = true;
   errorMessage.value = '';
   try {
-    settings.value = normalizeSettings(await invoke<ClientSettings>('login_with_password', {
+    applyPersistedSettings(await invoke<ClientSettings>('login_with_password', {
       apiBase: loginForm.value.api_base,
       username: loginForm.value.username,
       password: loginForm.value.password
@@ -648,7 +645,7 @@ async function enterOfflineMode() {
   authLoading.value = true;
   errorMessage.value = '';
   try {
-    settings.value = normalizeSettings(await invoke<ClientSettings>('use_offline_mode'));
+    applyPersistedSettings(await invoke<ClientSettings>('use_offline_mode'));
     view.value = 'history';
     await loadHistory();
     showNotice('success', '已进入离线模式');
@@ -662,7 +659,7 @@ async function enterOfflineMode() {
 async function logout() {
   errorMessage.value = '';
   try {
-    settings.value = normalizeSettings(await invoke<ClientSettings>('logout_client'));
+    applyPersistedSettings(await invoke<ClientSettings>('logout_client'));
     loginForm.value.api_base = settings.value.api_base || defaultApiBase;
     view.value = 'history';
     showNotice('success', '已退出登录');
@@ -689,6 +686,37 @@ function scheduleHistoryReload() {
   }, 120);
 }
 
+function scheduleSettingsSave(delay = 450) {
+  const snapshot = settingsSnapshot(settingsForSave());
+  if (snapshot === lastSavedSettingsSnapshot) return;
+  window.clearTimeout(settingsSaveTimer);
+  settingsSaveTimer = window.setTimeout(() => {
+    void saveSettingsNow();
+  }, delay);
+}
+
+async function saveSettingsNow() {
+  const next = settingsForSave();
+  const snapshot = settingsSnapshot(next);
+  if (snapshot === lastSavedSettingsSnapshot || settingsSaveRequestActive) return;
+
+  settingsSaveRequestActive = true;
+  saving.value = true;
+  errorMessage.value = '';
+  try {
+    await invoke('save_client_settings', { next });
+    lastSavedSettingsSnapshot = snapshot;
+    settings.value.poll_interval_ms = next.poll_interval_ms;
+  } catch (err) {
+    errorMessage.value = messageFromError(err, '自动保存失败');
+    showNotice('error', errorMessage.value);
+  } finally {
+    saving.value = false;
+    settingsSaveRequestActive = false;
+    if (settingsSnapshot(settingsForSave()) !== snapshot) scheduleSettingsSave(200);
+  }
+}
+
 async function loadHistory(options: { silent?: boolean } = {}) {
   if (historyLoading.value) return;
   const silent = Boolean(options.silent);
@@ -703,22 +731,6 @@ async function loadHistory(options: { silent?: boolean } = {}) {
     if (!silent) errorMessage.value = messageFromError(err, '加载本地历史失败');
   } finally {
     if (!silent) historyLoading.value = false;
-  }
-}
-
-async function save() {
-  saving.value = true;
-  errorMessage.value = '';
-  shortcutRecording.value = false;
-  try {
-    settings.value.poll_interval_ms = Math.max(300, Number(settings.value.poll_interval_ms) || 800);
-    await invoke('save_client_settings', { next: settings.value });
-    showNotice('success', '设置已保存');
-  } catch (err) {
-    errorMessage.value = messageFromError(err, '保存失败');
-    showNotice('error', errorMessage.value);
-  } finally {
-    saving.value = false;
   }
 }
 
@@ -801,9 +813,11 @@ async function togglePaused() {
   pauseSaving.value = true;
   errorMessage.value = '';
   const next = !settings.value.paused;
+  const wasClean = settingsSnapshot(settingsForSave()) === lastSavedSettingsSnapshot;
   try {
     await invoke('set_paused', { paused: next });
     settings.value.paused = next;
+    if (wasClean) rememberPersistedSettings();
     showNotice('success', next ? '已暂停监听' : '已恢复监听');
   } catch (err) {
     errorMessage.value = messageFromError(err, '切换监听状态失败');
@@ -947,6 +961,26 @@ function normalizeSettings(next: ClientSettings): ClientSettings {
     account_name: next.account_name || '',
     offline_mode: Boolean(next.offline_mode)
   };
+}
+
+function settingsForSave(next: ClientSettings = settings.value): ClientSettings {
+  return normalizeSettings({
+    ...next,
+    poll_interval_ms: Math.max(300, Number(next.poll_interval_ms) || 800)
+  });
+}
+
+function settingsSnapshot(next: ClientSettings) {
+  return JSON.stringify(next);
+}
+
+function rememberPersistedSettings(next: ClientSettings = settings.value) {
+  lastSavedSettingsSnapshot = settingsSnapshot(settingsForSave(next));
+}
+
+function applyPersistedSettings(next: ClientSettings) {
+  settings.value = normalizeSettings(next);
+  rememberPersistedSettings();
 }
 
 function showNotice(kind: Notice['kind'], text: string) {

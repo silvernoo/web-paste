@@ -21,14 +21,14 @@ jobs:
             runner: windows-latest
             target: x86_64-pc-windows-msvc
             bundles: none
-            artifact_name: Web-Paste_windows_x64.exe
+            artifact_name: Web-Paste_windows_x64.zip
             binary_name: Web Paste.exe
             binary_subdir: release
           - name: windows-arm64
             runner: windows-11-arm
             target: aarch64-pc-windows-msvc
             bundles: none
-            artifact_name: Web-Paste_windows_arm64.exe
+            artifact_name: Web-Paste_windows_arm64.zip
             binary_name: Web Paste.exe
             binary_subdir: release
           - name: macos-x64
@@ -48,15 +48,15 @@ jobs:
           - name: linux-x64
             runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-            bundles: none
-            artifact_name: Web-Paste_linux_x64
+            bundles: appimage
+            artifact_name: Web-Paste_linux_x64.AppImage
             binary_name: web-paste
             binary_subdir: release
           - name: linux-arm64
             runner: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
-            bundles: none
-            artifact_name: Web-Paste_linux_arm64
+            bundles: appimage
+            artifact_name: Web-Paste_linux_arm64.AppImage
             binary_name: web-paste
             binary_subdir: release
 
@@ -88,6 +88,7 @@ jobs:
             curl \
             wget \
             file \
+            libfuse2 \
             libssl-dev \
             libgtk-3-dev
 
@@ -129,6 +130,33 @@ jobs:
             exit 0
           fi
 
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            appimage=""
+            for bundle_dir in \
+              "src-tauri/target/${{ matrix.target }}/release/bundle/appimage" \
+              "src-tauri/target/release/bundle/appimage"
+            do
+              if [ -d "$bundle_dir" ]; then
+                for candidate in "$bundle_dir"/*.AppImage; do
+                  if [ -f "$candidate" ]; then
+                    appimage="$candidate"
+                    break 2
+                  fi
+                done
+              fi
+            done
+
+            if [ -z "$appimage" ]; then
+              echo "Linux AppImage not found. Built files under src-tauri/target:"
+              find src-tauri/target -maxdepth 5 -type f -o -type d | sort
+              exit 1
+            fi
+
+            cp "$appimage" "release-assets/${{ matrix.artifact_name }}"
+            chmod +x "release-assets/${{ matrix.artifact_name }}"
+            exit 0
+          fi
+
           binary=""
           for candidate in \
             "src-tauri/target/${{ matrix.target }}/${{ matrix.binary_subdir }}/${{ matrix.binary_name }}" \
@@ -144,6 +172,13 @@ jobs:
             echo "Executable not found. Built files under src-tauri/target:"
             find src-tauri/target -maxdepth 4 -type f | sort
             exit 1
+          fi
+
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            asset_path="$(cygpath -w "release-assets/${{ matrix.artifact_name }}")"
+            binary_path="$(cygpath -w "$binary")"
+            powershell -NoProfile -Command "Compress-Archive -LiteralPath '${binary_path}' -DestinationPath '${asset_path}' -Force"
+            exit 0
           fi
 
           cp "$binary" "release-assets/${{ matrix.artifact_name }}"

@@ -1382,7 +1382,11 @@ fn handle_ws_down_message(
     if item.device_id.as_deref() == Some(device_id) {
         return Ok(false);
     }
-    insert_remote_item(state, item)
+    let changed = insert_remote_item(state, item.clone())?;
+    if changed {
+        apply_remote_clipboard_item(state, &item)?;
+    }
+    Ok(changed)
 }
 
 fn insert_remote_item(state: &Arc<AppState>, item: RemoteClipboardItem) -> Result<bool> {
@@ -1407,6 +1411,31 @@ fn insert_remote_item(state: &Arc<AppState>, item: RemoteClipboardItem) -> Resul
         ],
     )?;
     Ok(changed > 0)
+}
+
+fn apply_remote_clipboard_item(state: &Arc<AppState>, item: &RemoteClipboardItem) -> Result<()> {
+    let value = match item.item_type.as_str() {
+        "text" | "rich_text" => item.content.as_deref().unwrap_or("").trim(),
+        "file_path" => item.file_path.as_deref().unwrap_or("").trim(),
+        "image" => item.blob_url.as_deref().unwrap_or("").trim(),
+        _ => "",
+    };
+    if value.is_empty() {
+        return Ok(());
+    }
+
+    suppress_clipboard_hash(state, remote_clipboard_hash(item, value))?;
+    let mut clipboard = Clipboard::new()?;
+    clipboard.set_text(value.to_string())?;
+    Ok(())
+}
+
+fn remote_clipboard_hash(item: &RemoteClipboardItem, value: &str) -> String {
+    if item.item_type == "file_path" {
+        format!("file:{}", hash_bytes(value.as_bytes()))
+    } else {
+        hash_bytes(value.as_bytes())
+    }
 }
 
 fn clear_realtime_runtime(state: &Arc<AppState>) {

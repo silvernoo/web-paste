@@ -1,5 +1,79 @@
 <template>
   <main class="h-screen overflow-hidden bg-[#f5f6f7] text-slate-900" :class="themeClass">
+    <section v-if="isQuickWindow" class="flex h-screen flex-col overflow-hidden border border-slate-200 bg-white text-slate-900 shadow-xl" :class="themeClass">
+      <header class="shrink-0 border-b border-slate-200 bg-white px-3 py-3">
+        <div class="mb-3 flex items-center justify-between gap-3">
+          <div class="flex min-w-0 items-center gap-2">
+            <div class="grid h-8 w-8 place-items-center rounded-md bg-slate-950 text-[11px] font-bold text-white">WP</div>
+            <div class="min-w-0">
+              <div class="truncate text-sm font-bold text-slate-950">剪切板历史</div>
+              <div class="truncate text-[11px] font-semibold text-slate-500">{{ statusLabel }}</div>
+            </div>
+          </div>
+          <button class="grid h-8 w-8 place-items-center rounded-full border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 disabled:opacity-60" type="button" title="刷新" :disabled="historyLoading" @click="loadHistory">
+            <RefreshCw :size="15" :class="{ 'animate-spin': historyLoading }" />
+          </button>
+        </div>
+        <div class="flex items-center gap-2">
+          <div class="flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3">
+            <Search :size="16" class="shrink-0 text-slate-400" />
+            <input v-model.trim="query" class="h-9 min-w-0 flex-1 border-0 bg-transparent text-sm font-medium outline-none placeholder:text-slate-400" placeholder="搜索本地历史" @input="scheduleHistoryLoad" />
+            <button v-if="query" class="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-slate-200 text-slate-500 hover:bg-slate-300 hover:text-slate-800" type="button" title="清空搜索" aria-label="清空搜索" @click="clearDesktopSearch">
+              <X :size="12" />
+            </button>
+          </div>
+          <button class="grid h-9 w-9 place-items-center rounded-lg bg-slate-950 text-white hover:bg-slate-800 disabled:opacity-60" type="button" title="搜索" :disabled="historyLoading" @click="loadHistory">
+            <Search :size="16" />
+          </button>
+        </div>
+      </header>
+
+      <section v-if="!initialized" class="grid min-h-0 flex-1 place-items-center bg-[#f6f7f8]">
+        <span class="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-600 shadow-sm">
+          <LoaderCircle :size="17" class="animate-spin text-blue-600" />
+          加载中
+        </span>
+      </section>
+      <section v-else-if="needsOnboarding" class="grid min-h-0 flex-1 place-items-center bg-[#f6f7f8] p-5 text-center">
+        <div class="grid gap-3">
+          <Cloud :size="26" class="mx-auto text-slate-400" />
+          <div class="text-sm font-bold text-slate-950">未登录同步</div>
+          <button class="h-9 rounded-md bg-slate-950 px-4 text-sm font-bold text-white" type="button" @click="openMainFromQuick">打开主界面</button>
+        </div>
+      </section>
+      <section v-else class="scrollbar-none min-h-0 flex-1 overflow-y-auto bg-[#f6f7f8] p-2">
+        <button
+          v-for="item in filteredHistory"
+          :key="item.id"
+          class="mb-2 grid w-full grid-cols-[34px_minmax(0,1fr)_auto] items-start gap-2 rounded-lg border border-slate-200 bg-white p-2.5 text-left shadow-sm hover:border-slate-300 hover:bg-slate-50"
+          type="button"
+          @click="quickCopy(item.id)"
+        >
+          <span :class="typeIconClass(item.item_type)" class="grid h-8 w-8 place-items-center rounded-md">
+            <component :is="typeIcon(item.item_type)" :size="16" />
+          </span>
+          <span class="min-w-0">
+            <span class="mb-0.5 flex min-w-0 items-center gap-2">
+              <strong class="text-xs font-bold text-slate-950">{{ label(item.item_type) }}</strong>
+              <span class="truncate text-[11px] font-semibold text-slate-400">{{ item.source_app || 'Unknown' }}</span>
+            </span>
+            <span class="line-clamp-2 whitespace-pre-wrap break-words text-xs leading-5 text-slate-600">{{ preview(item) }}</span>
+          </span>
+          <span class="text-[11px] font-medium text-slate-400">{{ formatDate(item.created_at) }}</span>
+        </button>
+        <div v-if="historyLoading" class="grid min-h-28 place-items-center rounded-lg border border-slate-200 bg-white text-sm font-semibold text-slate-500">
+          <span class="inline-flex items-center gap-2">
+            <LoaderCircle :size="16" class="animate-spin" />
+            加载中
+          </span>
+        </div>
+        <div v-else-if="filteredHistory.length === 0" class="grid min-h-28 place-items-center rounded-lg border border-dashed border-slate-300 bg-white text-sm font-semibold text-slate-500">
+          暂无记录
+        </div>
+      </section>
+    </section>
+
+    <template v-else>
     <section v-if="!initialized" class="grid min-h-screen place-items-center">
       <div class="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-600 shadow-sm">
         <LoaderCircle :size="18" class="animate-spin text-blue-600" />
@@ -153,10 +227,13 @@
 
           <section v-if="view === 'history'" class="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)] gap-4 overflow-hidden p-4 lg:p-5 xl:grid-cols-[minmax(0,1fr)_260px]">
             <div class="flex min-h-0 flex-col gap-3">
-              <div class="flex items-center gap-3">
+                <div class="flex items-center gap-3">
                 <div class="flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 shadow-sm">
                   <Search :size="17" class="shrink-0 text-slate-400" />
                   <input v-model.trim="query" class="h-10 min-w-0 flex-1 border-0 bg-transparent text-sm font-medium outline-none placeholder:text-slate-400" placeholder="搜索本地历史" @input="scheduleHistoryLoad" />
+                  <button v-if="query" class="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-slate-200 text-slate-500 hover:bg-slate-300 hover:text-slate-800" type="button" title="清空搜索" aria-label="清空搜索" @click="clearDesktopSearch">
+                    <X :size="12" />
+                  </button>
                 </div>
                 <select v-model="typeFilter" class="h-10 w-28 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 shadow-sm outline-none">
                   <option value="">全部</option>
@@ -379,6 +456,7 @@
         </div>
       </div>
     </section>
+    </template>
 
     <div v-if="notice" class="fixed bottom-5 right-5 z-50 flex max-w-[420px] items-center gap-3 rounded-lg px-4 py-3 text-sm font-semibold text-white shadow-xl" :class="notice.kind === 'success' ? 'bg-emerald-700' : 'bg-red-700'">
       <CheckCircle2 v-if="notice.kind === 'success'" :size="17" />
@@ -465,6 +543,7 @@ type UiTheme = 'white' | 'black';
 const defaultApiBase = 'https://paste-api.dangolabs.top';
 const defaultWebBase = (import.meta.env.VITE_WEB_BASE_URL || 'https://paste.dangolabs.top').replace(/\/$/, '');
 const uiThemeStorageKey = 'web-paste-ui-theme';
+const isQuickWindow = new URLSearchParams(window.location.search).get('quick') === '1';
 
 const settings = ref<ClientSettings>({
   api_base: defaultApiBase,
@@ -680,6 +759,35 @@ async function returnToLogin() {
   await logout();
 }
 
+function clearDesktopSearch() {
+  if (!query.value) return;
+  query.value = '';
+  void loadHistory();
+}
+
+async function quickCopy(id: string) {
+  copyingId.value = id;
+  errorMessage.value = '';
+  try {
+    await invoke('recopy_item', { id });
+    await invoke('close_quick_window');
+  } catch (err) {
+    errorMessage.value = messageFromError(err, '复制失败');
+    showNotice('error', errorMessage.value);
+  } finally {
+    copyingId.value = '';
+  }
+}
+
+async function openMainFromQuick() {
+  try {
+    await invoke('open_main_window');
+    await invoke('close_quick_window');
+  } catch (err) {
+    errorMessage.value = messageFromError(err, '打开主界面失败');
+  }
+}
+
 function scheduleHistoryLoad() {
   window.clearTimeout(searchTimer);
   searchTimer = window.setTimeout(() => {
@@ -893,6 +1001,13 @@ async function copy(id: string) {
   try {
     await invoke('recopy_item', { id });
     showNotice('success', '已复制到剪切板');
+    if (!isQuickWindow) {
+      try {
+        await invoke('hide_main_window');
+      } catch (err) {
+        console.warn('hide main window failed', err);
+      }
+    }
   } catch (err) {
     errorMessage.value = messageFromError(err, '复制失败');
     showNotice('error', errorMessage.value);

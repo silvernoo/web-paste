@@ -2,7 +2,7 @@
 
 use std::{
     borrow::Cow,
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     io::{Cursor, Read, Write},
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
@@ -18,6 +18,7 @@ use anyhow::{anyhow, Context, Result};
 use arboard::Clipboard;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use chrono::Utc;
+use futures_util::{SinkExt, StreamExt};
 use regex::Regex;
 use reqwest::Client;
 use rusqlite::{params, Connection};
@@ -27,6 +28,11 @@ use sha2::{Digest, Sha256};
 use tauri::{
     AppHandle, CustomMenuItem, GlobalShortcutManager, Manager, State, SystemTray, SystemTrayEvent,
     SystemTrayMenu,
+};
+use tokio::sync::{mpsc, oneshot};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{client::IntoClientRequest, http::HeaderValue, Message},
 };
 use uuid::Uuid;
 
@@ -100,6 +106,21 @@ struct AppState {
     paused: AtomicBool,
     suppressed_hashes: Mutex<VecDeque<String>>,
     registered_shortcut: Mutex<Option<String>>,
+    realtime: Mutex<Option<WsRuntime>>,
+}
+
+#[derive(Clone)]
+struct WsRuntime {
+    tx: mpsc::Sender<WsCommand>,
+    api_base: String,
+    token: String,
+    device_id: String,
+    shutdown: Arc<AtomicBool>,
+}
+
+struct WsCommand {
+    envelope: WsEnvelope,
+    reply: oneshot::Sender<Result<(), String>>,
 }
 
 struct SingleInstanceGuard {
@@ -276,6 +297,7 @@ fn main() {
                 settings: Mutex::new(settings),
                 suppressed_hashes: Mutex::new(VecDeque::new()),
                 registered_shortcut: Mutex::new(None),
+                realtime: Mutex::new(None),
             });
             app.manage(state.clone());
             start_single_instance_listener(single_instance_listener, app.handle());
@@ -287,6 +309,15 @@ fn main() {
             if let Err(err) = register_shortcut(&app.handle(), &state, &global_shortcut) {
                 eprintln!("register shortcut failed: {err}");
             }
+            let startup_state = state.clone();
+            let startup_app = app.handle();
+            tauri::async_runtime::spawn(async move {
+                if let Err(err) =
+                    start_realtime_if_configured(startup_state, Some(startup_app)).await
+                {
+                    eprintln!("websocket startup connect failed: {err}");
+                }
+            });
             tauri::async_runtime::spawn(clipboard_loop(state.clone(), app.handle()));
             tauri::async_runtime::spawn(sync_loop(state, app.handle()));
             Ok(())
@@ -302,7 +333,10 @@ fn main() {
             set_paused,
             force_sync,
             recopy_item,
-            clear_history
+            clear_history,
+            close_quick_window,
+            hide_main_window,
+            open_main_window
         ])
         .on_window_event(|event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event.event() {
@@ -337,8 +371,59 @@ struct AuthDevice {
     id: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct WsEnvelope {
+    protocol: String,
+    event: String,
+    message_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    device_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_device_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    record: Option<WsClipboardRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    item: Option<RemoteClipboardItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WsClipboardRecord {
+    id: String,
+    #[serde(rename = "type")]
+    item_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mime_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_app: Option<String>,
+    client_created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RemoteClipboardItem {
+    id: String,
+    device_id: Option<String>,
+    #[serde(rename = "type")]
+    item_type: String,
+    content: Option<String>,
+    file_path: Option<String>,
+    blob_url: Option<String>,
+    mime_type: Option<String>,
+    source_app: Option<String>,
+    created_at: String,
+}
+
 #[tauri::command]
 async fn login_with_password(
+    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     username: String,
     password: String,
@@ -389,6 +474,16 @@ async fn login_with_password(
     save_settings_to_db(&state.db_path, &next).map_err(to_string)?;
     state.paused.store(next.paused, Ordering::Relaxed);
     *state.settings.lock().map_err(to_string)? = next.clone();
+    clear_realtime_runtime(&state);
+    let runtime_state = state.inner().clone();
+    let runtime_settings = next.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(err) =
+            start_realtime_with_settings(runtime_state, runtime_settings, Some(app)).await
+        {
+            eprintln!("websocket login connect failed: {err}");
+        }
+    });
     Ok(next)
 }
 
@@ -402,6 +497,7 @@ fn use_offline_mode(state: State<'_, Arc<AppState>>) -> Result<ClientSettings, S
     next.account_name.clear();
     save_settings_to_db(&state.db_path, &next).map_err(to_string)?;
     *state.settings.lock().map_err(to_string)? = next.clone();
+    clear_realtime_runtime(&state);
     Ok(next)
 }
 
@@ -415,6 +511,7 @@ fn logout_client(state: State<'_, Arc<AppState>>) -> Result<ClientSettings, Stri
     next.account_name.clear();
     save_settings_to_db(&state.db_path, &next).map_err(to_string)?;
     *state.settings.lock().map_err(to_string)? = next.clone();
+    clear_realtime_runtime(&state);
     Ok(next)
 }
 
@@ -433,7 +530,14 @@ fn save_client_settings(
     }
     save_settings_to_db(&state.db_path, &next).map_err(to_string)?;
     state.paused.store(next.paused, Ordering::Relaxed);
-    *state.settings.lock().map_err(to_string)? = next;
+    *state.settings.lock().map_err(to_string)? = next.clone();
+    clear_realtime_runtime(&state);
+    let runtime_state = state.inner().clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(err) = start_realtime_with_settings(runtime_state, next, Some(app)).await {
+            eprintln!("websocket settings reconnect failed: {err}");
+        }
+    });
     Ok(())
 }
 
@@ -444,7 +548,7 @@ fn set_paused(state: State<'_, Arc<AppState>>, paused: bool) -> Result<(), Strin
 
 #[tauri::command]
 async fn force_sync(state: State<'_, Arc<AppState>>) -> Result<bool, String> {
-    force_sync_inner(state.inner().clone())
+    force_sync_inner(state.inner().clone(), None)
         .await
         .map_err(to_string)
 }
@@ -607,6 +711,28 @@ fn clear_history(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn close_quick_window(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_window("quick") {
+        window.hide().map_err(to_string)?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn hide_main_window(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_window("main") {
+        window.hide().map_err(to_string)?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn open_main_window(app: AppHandle) -> Result<(), String> {
+    open_main_window_with_view(&app, "history");
+    Ok(())
+}
+
 async fn clipboard_loop(state: Arc<AppState>, app: AppHandle) {
     let mut clipboard = match Clipboard::new() {
         Ok(value) => value,
@@ -701,7 +827,7 @@ fn current_clipboard_hash(clipboard: &mut Clipboard) -> Option<String> {
 async fn sync_loop(state: Arc<AppState>, app: AppHandle) {
     loop {
         let pending_before = unsynced_count(&state.db_path).unwrap_or(0);
-        if let Err(err) = force_sync_inner(state.clone()).await {
+        if let Err(err) = force_sync_inner(state.clone(), Some(app.clone())).await {
             eprintln!("sync failed: {err}");
         } else if pending_before > 0 {
             emit_history_changed(&app);
@@ -726,7 +852,7 @@ async fn persist_text(
         state, item_type, content, file_path, None, None, source_app, masked,
     )?;
     trigger_webhooks(settings, &item).await;
-    let _ = force_sync_inner(state.clone()).await;
+    let _ = force_sync_inner(state.clone(), None).await;
     Ok(())
 }
 
@@ -746,7 +872,7 @@ async fn persist_file_paths(
         false,
     )?;
     trigger_webhooks(settings, &item).await;
-    let _ = force_sync_inner(state.clone()).await;
+    let _ = force_sync_inner(state.clone(), None).await;
     Ok(())
 }
 
@@ -775,7 +901,7 @@ async fn persist_image(
         false,
     )?;
     trigger_webhooks(settings, &item).await;
-    let _ = force_sync_inner(state.clone()).await;
+    let _ = force_sync_inner(state.clone(), None).await;
     Ok(())
 }
 
@@ -824,7 +950,7 @@ fn insert_local_item(
     })
 }
 
-async fn force_sync_inner(state: Arc<AppState>) -> Result<bool> {
+async fn force_sync_inner(state: Arc<AppState>, app: Option<AppHandle>) -> Result<bool> {
     let settings = state
         .settings
         .lock()
@@ -838,13 +964,41 @@ async fn force_sync_inner(state: Arc<AppState>) -> Result<bool> {
         return Ok(false);
     }
 
+    let realtime = ensure_realtime_runtime(state.clone(), settings.clone(), app.clone())
+        .await
+        .ok();
     let pending = pending_items(&state.db_path, 50)?;
     if pending.is_empty() {
         return Ok(true);
     }
 
-    let mut records = Vec::new();
+    let mut realtime_synced_ids = Vec::new();
+    let mut http_pending = Vec::new();
     for item in pending {
+        if item.item_type != "image" {
+            if let Some(runtime) = realtime.as_ref() {
+                match publish_ws_item(runtime, &item).await {
+                    Ok(()) => {
+                        realtime_synced_ids.push(item.id);
+                        continue;
+                    }
+                    Err(err) => {
+                        eprintln!("websocket publish failed, falling back to http: {err}");
+                        clear_realtime_runtime(&state);
+                    }
+                }
+            }
+        }
+        http_pending.push(item);
+    }
+    mark_synced(&state.db_path, &realtime_synced_ids)?;
+
+    if http_pending.is_empty() {
+        return Ok(true);
+    }
+
+    let mut records = Vec::new();
+    for item in http_pending {
         let mut record = json!({
             "id": item.id,
             "device_id": settings.device_id,
@@ -897,6 +1051,31 @@ async fn force_sync_inner(state: Arc<AppState>) -> Result<bool> {
         .unwrap_or_default();
     mark_synced(&state.db_path, &ids)?;
     Ok(true)
+}
+
+async fn start_realtime_if_configured(state: Arc<AppState>, app: Option<AppHandle>) -> Result<()> {
+    let settings = state
+        .settings
+        .lock()
+        .map_err(|_| anyhow!("settings lock poisoned"))?
+        .clone();
+    start_realtime_with_settings(state, settings, app).await
+}
+
+async fn start_realtime_with_settings(
+    state: Arc<AppState>,
+    settings: ClientSettings,
+    app: Option<AppHandle>,
+) -> Result<()> {
+    if settings.offline_mode
+        || settings.token.trim().is_empty()
+        || settings.api_base.trim().is_empty()
+        || settings.device_id.trim().is_empty()
+    {
+        return Ok(());
+    }
+    ensure_realtime_runtime(state, settings, app).await?;
+    Ok(())
 }
 
 fn pending_items(db_path: &Path, limit: i64) -> Result<Vec<LocalItem>> {
@@ -952,6 +1131,290 @@ fn unsynced_count(db_path: &Path) -> Result<i64> {
         |row| row.get(0),
     )?;
     Ok(count)
+}
+
+async fn ensure_realtime_runtime(
+    state: Arc<AppState>,
+    settings: ClientSettings,
+    app: Option<AppHandle>,
+) -> Result<WsRuntime> {
+    if let Some(runtime) = state
+        .realtime
+        .lock()
+        .map_err(|_| anyhow!("realtime lock poisoned"))?
+        .clone()
+    {
+        if runtime.api_base == settings.api_base
+            && runtime.token == settings.token
+            && runtime.device_id == settings.device_id
+            && !runtime.shutdown.load(Ordering::Relaxed)
+        {
+            return Ok(runtime);
+        }
+    }
+
+    clear_realtime_runtime(&state);
+    let (tx, rx) = mpsc::channel(64);
+    let runtime = WsRuntime {
+        tx,
+        api_base: settings.api_base.clone(),
+        token: settings.token.clone(),
+        device_id: settings.device_id.clone(),
+        shutdown: Arc::new(AtomicBool::new(false)),
+    };
+    *state
+        .realtime
+        .lock()
+        .map_err(|_| anyhow!("realtime lock poisoned"))? = Some(runtime.clone());
+
+    let loop_state = state.clone();
+    let loop_runtime = runtime.clone();
+    tauri::async_runtime::spawn(async move {
+        realtime_event_loop(loop_state, app, loop_runtime, rx).await;
+    });
+    Ok(runtime)
+}
+
+async fn publish_ws_item(runtime: &WsRuntime, item: &LocalItem) -> Result<()> {
+    let envelope = WsEnvelope {
+        protocol: "webpaste.ws.v1".to_string(),
+        event: "clipboard.create".to_string(),
+        message_id: Uuid::new_v4().to_string(),
+        device_id: Some(runtime.device_id.clone()),
+        user_id: None,
+        source_device_id: None,
+        record: Some(WsClipboardRecord {
+            id: item.id.clone(),
+            item_type: item.item_type.clone(),
+            content: item.content.clone(),
+            file_path: item.file_path.clone(),
+            mime_type: item.mime_type.clone(),
+            source_app: item.source_app.clone(),
+            client_created_at: item.created_at.clone(),
+        }),
+        item: None,
+        error: None,
+        created_at: Utc::now().to_rfc3339(),
+    };
+    let (reply, ack) = oneshot::channel();
+    runtime
+        .tx
+        .send(WsCommand { envelope, reply })
+        .await
+        .map_err(|_| anyhow!("websocket runtime is stopped"))?;
+    match tokio::time::timeout(Duration::from_secs(8), ack).await {
+        Ok(Ok(Ok(()))) => Ok(()),
+        Ok(Ok(Err(err))) => Err(anyhow!(err)),
+        Ok(Err(_)) => Err(anyhow!("websocket ack channel closed")),
+        Err(_) => Err(anyhow!("websocket ack timeout")),
+    }
+}
+
+async fn realtime_event_loop(
+    state: Arc<AppState>,
+    app: Option<AppHandle>,
+    runtime: WsRuntime,
+    mut rx: mpsc::Receiver<WsCommand>,
+) {
+    let mut reconnect_delay = Duration::from_secs(1);
+    while !runtime.shutdown.load(Ordering::Relaxed) {
+        match connect_realtime_websocket(&runtime).await {
+            Ok((stream, _)) => {
+                reconnect_delay = Duration::from_secs(1);
+                let (mut writer, mut reader) = stream.split();
+                let mut pending: HashMap<String, oneshot::Sender<std::result::Result<(), String>>> =
+                    HashMap::new();
+                let mut ping = tokio::time::interval(Duration::from_secs(25));
+
+                loop {
+                    if runtime.shutdown.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    tokio::select! {
+                        command = rx.recv() => {
+                            let Some(command) = command else {
+                                return;
+                            };
+                            let message_id = command.envelope.message_id.clone();
+                            let payload = match serde_json::to_string(&command.envelope) {
+                                Ok(payload) => payload,
+                                Err(err) => {
+                                    let _ = command.reply.send(Err(err.to_string()));
+                                    continue;
+                                }
+                            };
+                            if let Err(err) = writer.send(Message::Text(payload)).await {
+                                let _ = command.reply.send(Err(err.to_string()));
+                                break;
+                            }
+                            pending.insert(message_id, command.reply);
+                        }
+                        message = reader.next() => {
+                            match message {
+                                Some(Ok(Message::Text(text))) => {
+                                    if let Err(err) = handle_ws_message(&state, app.as_ref(), &runtime.device_id, text.as_bytes(), &mut pending) {
+                                        eprintln!("websocket message failed: {err}");
+                                    }
+                                }
+                                Some(Ok(Message::Binary(bytes))) => {
+                                    if let Err(err) = handle_ws_message(&state, app.as_ref(), &runtime.device_id, &bytes, &mut pending) {
+                                        eprintln!("websocket message failed: {err}");
+                                    }
+                                }
+                                Some(Ok(Message::Ping(bytes))) => {
+                                    if writer.send(Message::Pong(bytes)).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                Some(Ok(Message::Pong(_))) => {}
+                                Some(Ok(Message::Close(_))) | None => break,
+                                Some(Err(err)) => {
+                                    eprintln!("websocket disconnected: {err}");
+                                    break;
+                                }
+                                Some(Ok(_)) => {}
+                            }
+                        }
+                        _ = ping.tick() => {
+                            if writer.send(Message::Ping(Vec::new())).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                for (_, reply) in pending {
+                    let _ = reply.send(Err("websocket disconnected".to_string()));
+                }
+            }
+            Err(err) => {
+                eprintln!("websocket connect failed: {err}");
+            }
+        }
+        tokio::time::sleep(reconnect_delay).await;
+        reconnect_delay = (reconnect_delay * 2).min(Duration::from_secs(30));
+    }
+}
+
+async fn connect_realtime_websocket(
+    runtime: &WsRuntime,
+) -> Result<(
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    tokio_tungstenite::tungstenite::handshake::client::Response,
+)> {
+    let url = websocket_url(&runtime.api_base, &runtime.device_id)?;
+    let mut request = url.into_client_request()?;
+    request.headers_mut().insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {}", runtime.token))?,
+    );
+    Ok(connect_async(request).await?)
+}
+
+fn websocket_url(api_base: &str, device_id: &str) -> Result<String> {
+    let base = api_base.trim().trim_end_matches('/');
+    if base.is_empty() {
+        return Err(anyhow!("api base is empty"));
+    }
+    let ws_base = if let Some(rest) = base.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else if let Some(rest) = base.strip_prefix("http://") {
+        format!("ws://{rest}")
+    } else if base.starts_with("ws://") || base.starts_with("wss://") {
+        base.to_string()
+    } else {
+        return Err(anyhow!("api base must start with http:// or https://"));
+    };
+    Ok(format!(
+        "{}/api/ws/clipboard?device_id={}",
+        ws_base.trim_end_matches('/'),
+        device_id
+    ))
+}
+
+fn handle_ws_message(
+    state: &Arc<AppState>,
+    app: Option<&AppHandle>,
+    device_id: &str,
+    payload: &[u8],
+    pending: &mut HashMap<String, oneshot::Sender<std::result::Result<(), String>>>,
+) -> Result<()> {
+    let envelope: WsEnvelope = serde_json::from_slice(payload)?;
+    match envelope.event.as_str() {
+        "clipboard.ack" => {
+            if let Some(reply) = pending.remove(&envelope.message_id) {
+                let _ = reply.send(Ok(()));
+            }
+        }
+        "clipboard.error" => {
+            if let Some(reply) = pending.remove(&envelope.message_id) {
+                let _ = reply.send(Err(envelope
+                    .error
+                    .unwrap_or_else(|| "websocket sync failed".to_string())));
+            }
+        }
+        "clipboard.created" => {
+            if handle_ws_down_message(state, device_id, envelope)? {
+                if let Some(app) = app {
+                    emit_history_changed(app);
+                }
+            }
+        }
+        "pong" => {}
+        _ => {}
+    }
+    Ok(())
+}
+
+fn handle_ws_down_message(
+    state: &Arc<AppState>,
+    device_id: &str,
+    envelope: WsEnvelope,
+) -> Result<bool> {
+    if envelope.protocol != "webpaste.ws.v1" {
+        return Ok(false);
+    }
+    if envelope.source_device_id.as_deref() == Some(device_id) {
+        return Ok(false);
+    }
+    let Some(item) = envelope.item else {
+        return Ok(false);
+    };
+    if item.device_id.as_deref() == Some(device_id) {
+        return Ok(false);
+    }
+    insert_remote_item(state, item)
+}
+
+fn insert_remote_item(state: &Arc<AppState>, item: RemoteClipboardItem) -> Result<bool> {
+    let conn = Connection::open(&state.db_path)?;
+    let changed = conn.execute(
+        r#"
+        INSERT INTO local_items (
+          id, item_type, content, file_path, object_path, mime_type, source_app, masked, synced, created_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, 1, ?8)
+        ON CONFLICT(id) DO NOTHING
+        "#,
+        params![
+            item.id,
+            item.item_type,
+            item.content,
+            item.file_path,
+            item.blob_url,
+            item.mime_type,
+            item.source_app,
+            item.created_at
+        ],
+    )?;
+    Ok(changed > 0)
+}
+
+fn clear_realtime_runtime(state: &Arc<AppState>) {
+    if let Ok(mut realtime) = state.realtime.lock() {
+        if let Some(runtime) = realtime.take() {
+            runtime.shutdown.store(true, Ordering::Relaxed);
+        }
+    }
 }
 
 fn emit_history_changed(app: &AppHandle) {
@@ -1225,6 +1688,7 @@ fn set_paused_inner(state: &Arc<AppState>, paused: bool) -> Result<()> {
 
 fn handle_tray_event(app: &AppHandle, event: SystemTrayEvent) {
     match event {
+        SystemTrayEvent::LeftClick { .. } => {}
         SystemTrayEvent::DoubleClick { .. } => open_main_window_with_view(app, "history"),
         SystemTrayEvent::MenuItemClick { id, .. } => match id.as_str() {
             "open" => open_main_window_with_view(app, "history"),
@@ -1244,7 +1708,7 @@ fn handle_tray_event(app: &AppHandle, event: SystemTrayEvent) {
             "sync" => {
                 let state = app.state::<Arc<AppState>>().inner().clone();
                 tauri::async_runtime::spawn(async move {
-                    let _ = force_sync_inner(state).await;
+                    let _ = force_sync_inner(state, None).await;
                 });
             }
             "quit" => app.exit(0),

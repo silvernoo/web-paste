@@ -11,7 +11,7 @@ use std::{
         Arc, Mutex,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -20,7 +20,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use regex::Regex;
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -39,6 +39,7 @@ use uuid::Uuid;
 const SINGLE_INSTANCE_PORT: u16 = 45937;
 const SINGLE_INSTANCE_ACTIVATE_MESSAGE: &[u8] = b"web-paste:activate:v1";
 const DEFAULT_API_BASE: &str = "https://paste-api.dangolabs.top";
+const DESKTOP_TOKEN_REFRESH_INTERVAL: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ClientSettings {
@@ -47,6 +48,8 @@ struct ClientSettings {
     device_id: String,
     device_name: String,
     device_fingerprint: String,
+    #[serde(default)]
+    account_id: String,
     #[serde(default)]
     account_name: String,
     #[serde(default)]
@@ -70,6 +73,7 @@ impl Default for ClientSettings {
             device_id: String::new(),
             device_name: hostname(),
             device_fingerprint: Uuid::new_v4().to_string(),
+            account_id: String::new(),
             account_name: String::new(),
             offline_mode: false,
             poll_interval_ms: 800,
@@ -107,6 +111,7 @@ struct AppState {
     suppressed_hashes: Mutex<VecDeque<String>>,
     registered_shortcut: Mutex<Option<String>>,
     realtime: Mutex<Option<WsRuntime>>,
+    last_token_refresh: Mutex<Option<Instant>>,
 }
 
 #[derive(Clone)]
@@ -298,6 +303,7 @@ fn main() {
                 suppressed_hashes: Mutex::new(VecDeque::new()),
                 registered_shortcut: Mutex::new(None),
                 realtime: Mutex::new(None),
+                last_token_refresh: Mutex::new(None),
             });
             app.manage(state.clone());
             start_single_instance_listener(single_instance_listener, app.handle());
@@ -363,6 +369,7 @@ struct AuthResponse {
 
 #[derive(Debug, Deserialize)]
 struct AuthUser {
+    id: String,
     email: String,
 }
 
@@ -443,6 +450,7 @@ async fn login_with_password(
         .json(&json!({
             "email": username,
             "password": password,
+            "remember_me": true,
             "device": {
                 "fingerprint": fingerprint,
                 "name": device_name,
@@ -469,11 +477,13 @@ async fn login_with_password(
     next.device_id = device_id;
     next.device_name = device_name;
     next.device_fingerprint = fingerprint;
+    next.account_id = auth.user.id;
     next.account_name = auth.user.email;
     next.offline_mode = false;
     save_settings_to_db(&state.db_path, &next).map_err(to_string)?;
     state.paused.store(next.paused, Ordering::Relaxed);
     *state.settings.lock().map_err(to_string)? = next.clone();
+    reset_token_refresh_timer(&state, Some(Instant::now()));
     clear_realtime_runtime(&state);
     let runtime_state = state.inner().clone();
     let runtime_settings = next.clone();
@@ -494,9 +504,11 @@ fn use_offline_mode(state: State<'_, Arc<AppState>>) -> Result<ClientSettings, S
     next.offline_mode = true;
     next.token.clear();
     next.device_id.clear();
+    next.account_id.clear();
     next.account_name.clear();
     save_settings_to_db(&state.db_path, &next).map_err(to_string)?;
     *state.settings.lock().map_err(to_string)? = next.clone();
+    reset_token_refresh_timer(&state, None);
     clear_realtime_runtime(&state);
     Ok(next)
 }
@@ -508,9 +520,11 @@ fn logout_client(state: State<'_, Arc<AppState>>) -> Result<ClientSettings, Stri
     next.offline_mode = false;
     next.token.clear();
     next.device_id.clear();
+    next.account_id.clear();
     next.account_name.clear();
     save_settings_to_db(&state.db_path, &next).map_err(to_string)?;
     *state.settings.lock().map_err(to_string)? = next.clone();
+    reset_token_refresh_timer(&state, None);
     clear_realtime_runtime(&state);
     Ok(next)
 }
@@ -531,6 +545,7 @@ fn save_client_settings(
     save_settings_to_db(&state.db_path, &next).map_err(to_string)?;
     state.paused.store(next.paused, Ordering::Relaxed);
     *state.settings.lock().map_err(to_string)? = next.clone();
+    reset_token_refresh_timer(&state, None);
     clear_realtime_runtime(&state);
     let runtime_state = state.inner().clone();
     tauri::async_runtime::spawn(async move {
@@ -560,6 +575,7 @@ fn get_history(
     limit: i64,
     offset: i64,
 ) -> Result<Vec<LocalItem>, String> {
+    let account_key = current_account_key(&state).map_err(to_string)?;
     let conn = Connection::open(&state.db_path).map_err(to_string)?;
     let like = format!("%{}%", query.trim());
     let mut stmt = conn
@@ -567,29 +583,35 @@ fn get_history(
             r#"
             SELECT id, item_type, content, file_path, object_path, mime_type, source_app, synced, created_at
             FROM local_items
-            WHERE ?1 = '%%'
-               OR COALESCE(content, '') LIKE ?1
-               OR COALESCE(file_path, '') LIKE ?1
-               OR COALESCE(source_app, '') LIKE ?1
+            WHERE account_key = ?1
+              AND (
+                ?2 = '%%'
+                OR COALESCE(content, '') LIKE ?2
+                OR COALESCE(file_path, '') LIKE ?2
+                OR COALESCE(source_app, '') LIKE ?2
+              )
             ORDER BY datetime(created_at) DESC
-            LIMIT ?2 OFFSET ?3
+            LIMIT ?3 OFFSET ?4
             "#,
         )
         .map_err(to_string)?;
     let rows = stmt
-        .query_map(params![like, limit.clamp(1, 200), offset.max(0)], |row| {
-            Ok(LocalItem {
-                id: row.get(0)?,
-                item_type: row.get(1)?,
-                content: row.get(2)?,
-                file_path: row.get(3)?,
-                object_path: row.get(4)?,
-                mime_type: row.get(5)?,
-                source_app: row.get(6)?,
-                synced: row.get::<_, i64>(7)? == 1,
-                created_at: row.get(8)?,
-            })
-        })
+        .query_map(
+            params![account_key, like, limit.clamp(1, 200), offset.max(0)],
+            |row| {
+                Ok(LocalItem {
+                    id: row.get(0)?,
+                    item_type: row.get(1)?,
+                    content: row.get(2)?,
+                    file_path: row.get(3)?,
+                    object_path: row.get(4)?,
+                    mime_type: row.get(5)?,
+                    source_app: row.get(6)?,
+                    synced: row.get::<_, i64>(7)? == 1,
+                    created_at: row.get(8)?,
+                })
+            },
+        )
         .map_err(to_string)?;
 
     let mut out = Vec::new();
@@ -604,11 +626,12 @@ fn get_image_preview_data_url(
     state: State<'_, Arc<AppState>>,
     id: String,
 ) -> Result<String, String> {
+    let account_key = current_account_key(&state).map_err(to_string)?;
     let conn = Connection::open(&state.db_path).map_err(to_string)?;
     let (item_type, object_path, mime_type) = conn
         .query_row(
-            "SELECT item_type, object_path, mime_type FROM local_items WHERE id = ?1",
-            params![id],
+            "SELECT item_type, object_path, mime_type FROM local_items WHERE account_key = ?1 AND id = ?2",
+            params![account_key, id],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -651,11 +674,12 @@ fn get_image_preview_data_url(
 
 #[tauri::command]
 fn recopy_item(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
+    let account_key = current_account_key(&state).map_err(to_string)?;
     let conn = Connection::open(&state.db_path).map_err(to_string)?;
     let item = conn
         .query_row(
-            "SELECT item_type, content, file_path, object_path FROM local_items WHERE id = ?1",
-            params![id],
+            "SELECT item_type, content, file_path, object_path FROM local_items WHERE account_key = ?1 AND id = ?2",
+            params![account_key, id],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -700,14 +724,37 @@ fn recopy_item(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String
 
 #[tauri::command]
 fn clear_history(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let account_key = current_account_key(&state).map_err(to_string)?;
     let conn = Connection::open(&state.db_path).map_err(to_string)?;
-    conn.execute("DELETE FROM local_items", [])
-        .map_err(to_string)?;
     let images_dir = state.data_dir.join("images");
-    if images_dir.exists() {
-        std::fs::remove_dir_all(&images_dir).map_err(to_string)?;
+    std::fs::create_dir_all(&images_dir).map_err(to_string)?;
+    let images_root = images_dir.canonicalize().map_err(to_string)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT object_path FROM local_items WHERE account_key = ?1 AND item_type = 'image' AND object_path IS NOT NULL",
+        )
+        .map_err(to_string)?;
+    let rows = stmt
+        .query_map(params![account_key.clone()], |row| row.get::<_, String>(0))
+        .map_err(to_string)?;
+    let mut image_paths = Vec::new();
+    for row in rows {
+        image_paths.push(row.map_err(to_string)?);
     }
-    std::fs::create_dir_all(images_dir).map_err(to_string)?;
+    conn.execute(
+        "DELETE FROM local_items WHERE account_key = ?1",
+        params![account_key],
+    )
+    .map_err(to_string)?;
+    for image_path in image_paths {
+        let path = PathBuf::from(image_path);
+        let Ok(canonical) = path.canonicalize() else {
+            continue;
+        };
+        if canonical.starts_with(&images_root) && canonical.is_file() {
+            std::fs::remove_file(canonical).map_err(to_string)?;
+        }
+    }
     Ok(())
 }
 
@@ -826,7 +873,11 @@ fn current_clipboard_hash(clipboard: &mut Clipboard) -> Option<String> {
 
 async fn sync_loop(state: Arc<AppState>, app: AppHandle) {
     loop {
-        let pending_before = unsynced_count(&state.db_path).unwrap_or(0);
+        if let Err(err) = refresh_desktop_token_if_due(state.clone()).await {
+            eprintln!("desktop token refresh failed: {err}");
+        }
+        let account_key = current_account_key(&state).unwrap_or_else(|_| "local".to_string());
+        let pending_before = unsynced_count(&state.db_path, &account_key).unwrap_or(0);
         if let Err(err) = force_sync_inner(state.clone(), Some(app.clone())).await {
             eprintln!("sync failed: {err}");
         } else if pending_before > 0 {
@@ -882,7 +933,12 @@ async fn persist_image(
     image: arboard::ImageData<'_>,
 ) -> Result<()> {
     let id = Uuid::new_v4().to_string();
-    let path = state.data_dir.join("images").join(format!("{id}.png"));
+    let image_dir = state
+        .data_dir
+        .join("images")
+        .join(hash_bytes(account_key_from_settings(settings).as_bytes()));
+    std::fs::create_dir_all(&image_dir)?;
+    let path = image_dir.join(format!("{id}.png"));
     let buffer = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
         image.width as u32,
         image.height as u32,
@@ -915,18 +971,24 @@ fn insert_local_item(
     source_app: Option<String>,
     masked: bool,
 ) -> Result<LocalItem> {
+    let settings = state
+        .settings
+        .lock()
+        .map_err(|_| anyhow!("settings lock poisoned"))?;
+    let account_key = account_key_from_settings(&settings);
     let id = Uuid::new_v4().to_string();
     let created_at = Utc::now().to_rfc3339();
     let conn = Connection::open(&state.db_path)?;
     conn.execute(
         r#"
         INSERT INTO local_items (
-          id, item_type, content, file_path, object_path, mime_type, source_app, masked, synced, created_at
+          id, account_key, item_type, content, file_path, object_path, mime_type, source_app, masked, synced, created_at
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10)
         "#,
         params![
             id,
+            account_key,
             item_type,
             content,
             file_path,
@@ -967,7 +1029,8 @@ async fn force_sync_inner(state: Arc<AppState>, app: Option<AppHandle>) -> Resul
     let realtime = ensure_realtime_runtime(state.clone(), settings.clone(), app.clone())
         .await
         .ok();
-    let pending = pending_items(&state.db_path, 50)?;
+    let account_key = account_key_from_settings(&settings);
+    let pending = pending_items(&state.db_path, &account_key, 50)?;
     if pending.is_empty() {
         return Ok(true);
     }
@@ -991,7 +1054,7 @@ async fn force_sync_inner(state: Arc<AppState>, app: Option<AppHandle>) -> Resul
         }
         http_pending.push(item);
     }
-    mark_synced(&state.db_path, &realtime_synced_ids)?;
+    mark_synced(&state.db_path, &account_key, &realtime_synced_ids)?;
 
     if http_pending.is_empty() {
         return Ok(true);
@@ -1027,10 +1090,11 @@ async fn force_sync_inner(state: Arc<AppState>, app: Option<AppHandle>) -> Resul
     let url = format!("{}/api/sync/batch", settings.api_base.trim_end_matches('/'));
     let res = client
         .post(url)
-        .bearer_auth(settings.token)
+        .bearer_auth(&settings.token)
         .json(&json!({ "records": records }))
         .send()
         .await?;
+    apply_renewed_token_from_headers(&state, res.headers())?;
     if !res.status().is_success() {
         return Ok(false);
     }
@@ -1049,11 +1113,14 @@ async fn force_sync_inner(state: Arc<AppState>, app: Option<AppHandle>) -> Resul
                 .collect()
         })
         .unwrap_or_default();
-    mark_synced(&state.db_path, &ids)?;
+    mark_synced(&state.db_path, &account_key, &ids)?;
     Ok(true)
 }
 
 async fn start_realtime_if_configured(state: Arc<AppState>, app: Option<AppHandle>) -> Result<()> {
+    if let Err(err) = refresh_desktop_token_if_due(state.clone()).await {
+        eprintln!("desktop token refresh before websocket failed: {err}");
+    }
     let settings = state
         .settings
         .lock()
@@ -1078,18 +1145,18 @@ async fn start_realtime_with_settings(
     Ok(())
 }
 
-fn pending_items(db_path: &Path, limit: i64) -> Result<Vec<LocalItem>> {
+fn pending_items(db_path: &Path, account_key: &str, limit: i64) -> Result<Vec<LocalItem>> {
     let conn = Connection::open(db_path)?;
     let mut stmt = conn.prepare(
         r#"
         SELECT id, item_type, content, file_path, object_path, mime_type, source_app, synced, created_at
         FROM local_items
-        WHERE synced = 0
+        WHERE account_key = ?1 AND synced = 0
         ORDER BY datetime(created_at) ASC
-        LIMIT ?1
+        LIMIT ?2
         "#,
     )?;
-    let rows = stmt.query_map(params![limit], |row| {
+    let rows = stmt.query_map(params![account_key, limit], |row| {
         Ok(LocalItem {
             id: row.get(0)?,
             item_type: row.get(1)?,
@@ -1109,25 +1176,25 @@ fn pending_items(db_path: &Path, limit: i64) -> Result<Vec<LocalItem>> {
     Ok(out)
 }
 
-fn mark_synced(db_path: &Path, ids: &[String]) -> Result<()> {
+fn mark_synced(db_path: &Path, account_key: &str, ids: &[String]) -> Result<()> {
     if ids.is_empty() {
         return Ok(());
     }
     let conn = Connection::open(db_path)?;
     for id in ids {
         conn.execute(
-            "UPDATE local_items SET synced = 1 WHERE id = ?1",
-            params![id],
+            "UPDATE local_items SET synced = 1 WHERE account_key = ?1 AND id = ?2",
+            params![account_key, id],
         )?;
     }
     Ok(())
 }
 
-fn unsynced_count(db_path: &Path) -> Result<i64> {
+fn unsynced_count(db_path: &Path, account_key: &str) -> Result<i64> {
     let conn = Connection::open(db_path)?;
     let count = conn.query_row(
-        "SELECT COUNT(*) FROM local_items WHERE synced = 0",
-        [],
+        "SELECT COUNT(*) FROM local_items WHERE account_key = ?1 AND synced = 0",
+        params![account_key],
         |row| row.get(0),
     )?;
     Ok(count)
@@ -1390,17 +1457,19 @@ fn handle_ws_down_message(
 }
 
 fn insert_remote_item(state: &Arc<AppState>, item: RemoteClipboardItem) -> Result<bool> {
+    let account_key = current_account_key(state)?;
     let conn = Connection::open(&state.db_path)?;
     let changed = conn.execute(
         r#"
         INSERT INTO local_items (
-          id, item_type, content, file_path, object_path, mime_type, source_app, masked, synced, created_at
+          id, account_key, item_type, content, file_path, object_path, mime_type, source_app, masked, synced, created_at
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, 1, ?8)
-        ON CONFLICT(id) DO NOTHING
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, 1, ?9)
+        ON CONFLICT(account_key, id) DO NOTHING
         "#,
         params![
             item.id,
+            account_key,
             item.item_type,
             item.content,
             item.file_path,
@@ -1444,6 +1513,90 @@ fn clear_realtime_runtime(state: &Arc<AppState>) {
             runtime.shutdown.store(true, Ordering::Relaxed);
         }
     }
+}
+
+fn reset_token_refresh_timer(state: &Arc<AppState>, value: Option<Instant>) {
+    if let Ok(mut last_token_refresh) = state.last_token_refresh.lock() {
+        *last_token_refresh = value;
+    }
+}
+
+async fn refresh_desktop_token_if_due(state: Arc<AppState>) -> Result<()> {
+    let settings = state
+        .settings
+        .lock()
+        .map_err(|_| anyhow!("settings lock poisoned"))?
+        .clone();
+    if settings.offline_mode
+        || settings.token.trim().is_empty()
+        || settings.api_base.trim().is_empty()
+        || settings.device_id.trim().is_empty()
+    {
+        return Ok(());
+    }
+
+    {
+        let last_token_refresh = state
+            .last_token_refresh
+            .lock()
+            .map_err(|_| anyhow!("token refresh lock poisoned"))?;
+        if last_token_refresh
+            .map(|last| last.elapsed() < DESKTOP_TOKEN_REFRESH_INTERVAL)
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+    }
+
+    let client = Client::new();
+    let url = format!("{}/api/me", settings.api_base.trim_end_matches('/'));
+    let res = client.get(url).bearer_auth(&settings.token).send().await?;
+    let status = res.status();
+    apply_renewed_token_from_headers(&state, res.headers())?;
+    if status == StatusCode::UNAUTHORIZED {
+        return Err(anyhow!("desktop token unauthorized"));
+    }
+    if !status.is_success() {
+        return Err(anyhow!("desktop token refresh returned {status}"));
+    }
+    reset_token_refresh_timer(&state, Some(Instant::now()));
+    Ok(())
+}
+
+fn apply_renewed_token_from_headers(
+    state: &Arc<AppState>,
+    headers: &reqwest::header::HeaderMap,
+) -> Result<bool> {
+    let Some(value) = headers.get("X-Renewed-Token") else {
+        return Ok(false);
+    };
+    let token = value.to_str()?.trim();
+    if token.is_empty() {
+        return Ok(false);
+    }
+
+    let expires_at = headers
+        .get("X-Renewed-Token-Expires-At")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let mut settings = state
+        .settings
+        .lock()
+        .map_err(|_| anyhow!("settings lock poisoned"))?;
+    if settings.token == token {
+        return Ok(false);
+    }
+    settings.token = token.to_string();
+    save_settings_to_db(&state.db_path, &settings)?;
+    reset_token_refresh_timer(state, Some(Instant::now()));
+    drop(settings);
+    clear_realtime_runtime(state);
+    if expires_at.is_empty() {
+        eprintln!("desktop auth token renewed");
+    } else {
+        eprintln!("desktop auth token renewed expires_at={expires_at}");
+    }
+    Ok(true)
 }
 
 fn emit_history_changed(app: &AppHandle) {
@@ -1801,7 +1954,8 @@ fn init_db(db_path: &Path) -> Result<()> {
     conn.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS local_items (
-            id text PRIMARY KEY,
+            id text NOT NULL,
+            account_key text NOT NULL DEFAULT 'local',
             item_type text NOT NULL,
             content text,
             file_path text,
@@ -1810,15 +1964,64 @@ fn init_db(db_path: &Path) -> Result<()> {
             source_app text,
             masked integer NOT NULL DEFAULT 0,
             synced integer NOT NULL DEFAULT 0,
-            created_at text NOT NULL
+            created_at text NOT NULL,
+            PRIMARY KEY (account_key, id)
         );
         CREATE INDEX IF NOT EXISTS idx_local_items_created ON local_items(datetime(created_at) DESC);
-        CREATE INDEX IF NOT EXISTS idx_local_items_synced ON local_items(synced, datetime(created_at));
 
         CREATE TABLE IF NOT EXISTS settings (
             key text PRIMARY KEY,
             value text NOT NULL
         );
+        "#,
+    )?;
+    let has_account_key: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('local_items') WHERE name = 'account_key'",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_account_key == 0 {
+        conn.execute(
+            "ALTER TABLE local_items ADD COLUMN account_key text NOT NULL DEFAULT 'local'",
+            [],
+        )?;
+    }
+    let single_id_pk: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('local_items') WHERE name = 'id' AND pk = 1",
+        [],
+        |row| row.get(0),
+    )?;
+    if single_id_pk > 0 {
+        conn.execute_batch(
+            r#"
+            ALTER TABLE local_items RENAME TO local_items_legacy;
+            CREATE TABLE local_items (
+                id text NOT NULL,
+                account_key text NOT NULL DEFAULT 'local',
+                item_type text NOT NULL,
+                content text,
+                file_path text,
+                object_path text,
+                mime_type text,
+                source_app text,
+                masked integer NOT NULL DEFAULT 0,
+                synced integer NOT NULL DEFAULT 0,
+                created_at text NOT NULL,
+                PRIMARY KEY (account_key, id)
+            );
+            INSERT OR IGNORE INTO local_items (
+                id, account_key, item_type, content, file_path, object_path, mime_type, source_app, masked, synced, created_at
+            )
+            SELECT id, COALESCE(NULLIF(account_key, ''), 'local'), item_type, content, file_path, object_path, mime_type, source_app, masked, synced, created_at
+            FROM local_items_legacy;
+            DROP TABLE local_items_legacy;
+            "#,
+        )?;
+    }
+    conn.execute_batch(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_local_items_account_created ON local_items(account_key, datetime(created_at) DESC);
+        CREATE INDEX IF NOT EXISTS idx_local_items_synced ON local_items(account_key, synced, datetime(created_at));
         "#,
     )?;
     Ok(())
@@ -1856,6 +2059,27 @@ fn normalize_client_settings(mut settings: ClientSettings) -> ClientSettings {
         settings.mask_rules = default_mask_rules();
     }
     settings
+}
+
+fn current_account_key(state: &Arc<AppState>) -> Result<String> {
+    let settings = state
+        .settings
+        .lock()
+        .map_err(|_| anyhow!("settings lock poisoned"))?;
+    Ok(account_key_from_settings(&settings))
+}
+
+fn account_key_from_settings(settings: &ClientSettings) -> String {
+    if settings.offline_mode {
+        return "offline".to_string();
+    }
+    if !settings.account_id.trim().is_empty() {
+        return format!("user:{}", settings.account_id.trim());
+    }
+    if !settings.account_name.trim().is_empty() {
+        return format!("email:{}", settings.account_name.trim().to_lowercase());
+    }
+    "local".to_string()
 }
 
 fn default_mask_rules() -> Vec<String> {

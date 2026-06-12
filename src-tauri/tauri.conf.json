@@ -31,12 +31,15 @@
     "windows": [
       {
         "title": "Web Paste",
-        "width": 980,
-        "height": 720,
-        "minWidth": 720,
-        "minHeight": 560,
+        "width": 1060,
+        "height": 700,
+        "minWidth": 1060,
+        "minHeight": 700,
+        "center": true,
         "resizable": false,
         "maximizable": false,
+        "decorations": false,
+        "transparent": false,
         "visible": true
       }
     ],

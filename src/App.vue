@@ -1,494 +1,541 @@
 <template>
-  <main class="h-screen overflow-hidden bg-[#f5f6f7] text-slate-900" :class="themeClass">
-    <section v-if="isQuickWindow" class="flex h-screen flex-col overflow-hidden border border-slate-200 bg-white text-slate-900 shadow-xl" :class="themeClass">
-      <header class="shrink-0 border-b border-slate-200 bg-white px-3 py-3">
-        <div class="mb-3 flex items-center justify-between gap-3">
-          <div class="flex min-w-0 items-center gap-2">
-            <div class="grid h-8 w-8 place-items-center rounded-md bg-slate-950 text-[11px] font-bold text-white">WP</div>
-            <div class="min-w-0">
-              <div class="truncate text-sm font-bold text-slate-950">剪切板历史</div>
-              <div class="truncate text-[11px] font-semibold text-slate-500">{{ statusLabel }}</div>
-            </div>
-          </div>
-          <button class="grid h-8 w-8 place-items-center rounded-full border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 disabled:opacity-60" type="button" title="刷新" :disabled="historyLoading" @click="loadHistory">
-            <RefreshCw :size="15" :class="{ 'animate-spin': historyLoading }" />
-          </button>
+  <main
+    class="app-shell"
+    :class="[themeClass, { 'is-quick': isQuickWindow }]"
+    @click="closeContextMenu"
+    @contextmenu.prevent="openContextMenu($event)"
+  >
+    <section v-if="isQuickWindow" class="quick-window" :class="themeClass">
+      <header class="quick-titlebar" data-tauri-drag-region>
+        <div class="brand-mark" data-tauri-drag-region>WP</div>
+        <div class="title-copy" data-tauri-drag-region>
+          <strong data-tauri-drag-region>剪切板历史</strong>
+          <span data-tauri-drag-region>{{ statusLabel }}</span>
         </div>
-        <div class="flex items-center gap-2">
-          <div class="flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3">
-            <Search :size="16" class="shrink-0 text-slate-400" />
-            <input v-model.trim="query" class="h-9 min-w-0 flex-1 border-0 bg-transparent text-sm font-medium outline-none placeholder:text-slate-400" placeholder="搜索本地历史" @input="scheduleHistoryLoad" />
-            <button v-if="query" class="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-slate-200 text-slate-500 hover:bg-slate-300 hover:text-slate-800" type="button" title="清空搜索" aria-label="清空搜索" @click="clearDesktopSearch">
-              <X :size="12" />
-            </button>
-          </div>
-          <button class="grid h-9 w-9 place-items-center rounded-lg bg-slate-950 text-white hover:bg-slate-800 disabled:opacity-60" type="button" title="搜索" :disabled="historyLoading" @click="loadHistory">
-            <Search :size="16" />
-          </button>
-        </div>
+        <button class="icon-button" type="button" title="刷新" :disabled="historyLoading" @click.stop="loadHistory">
+          <RefreshCw :size="15" :class="{ 'animate-spin': historyLoading }" />
+        </button>
       </header>
 
-      <section v-if="!initialized" class="grid min-h-0 flex-1 place-items-center bg-[#f6f7f8]">
-        <span class="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-600 shadow-sm">
-          <LoaderCircle :size="17" class="animate-spin text-blue-600" />
+      <div class="quick-search">
+        <div class="search-field compact">
+          <Search :size="15" />
+          <input v-model.trim="query" placeholder="搜索本地历史" @input="scheduleHistoryLoad" />
+          <button v-if="query" class="field-clear" type="button" title="清空搜索" @click.stop="clearDesktopSearch">
+            <X :size="12" />
+          </button>
+        </div>
+      </div>
+
+      <section v-if="!initialized" class="state-pane">
+        <span class="loading-pill">
+          <LoaderCircle :size="16" class="animate-spin" />
           加载中
         </span>
       </section>
-      <section v-else-if="needsOnboarding" class="grid min-h-0 flex-1 place-items-center bg-[#f6f7f8] p-5 text-center">
-        <div class="grid gap-3">
-          <Cloud :size="26" class="mx-auto text-slate-400" />
-          <div class="text-sm font-bold text-slate-950">未登录同步</div>
-          <button class="h-9 rounded-md bg-slate-950 px-4 text-sm font-bold text-white" type="button" @click="openMainFromQuick">打开主界面</button>
+
+      <section v-else-if="needsOnboarding" class="state-pane">
+        <div class="empty-state">
+          <Cloud :size="28" />
+          <strong>未登录同步</strong>
+          <button class="primary-button" type="button" @click="openMainFromQuick">打开主界面</button>
         </div>
       </section>
-      <section v-else class="scrollbar-none min-h-0 flex-1 overflow-y-auto bg-[#f6f7f8] p-2">
+
+      <section v-else class="quick-list scrollbar-none">
         <button
           v-for="item in filteredHistory"
           :key="item.id"
-          class="mb-2 grid w-full grid-cols-[34px_minmax(0,1fr)_auto] items-start gap-2 rounded-lg border border-slate-200 bg-white p-2.5 text-left shadow-sm hover:border-slate-300 hover:bg-slate-50"
+          class="quick-item"
           type="button"
-          @click="quickCopy(item.id)"
+          @click.stop="quickCopy(item.id)"
+          @contextmenu.prevent.stop="openContextMenu($event, item)"
         >
-          <span :class="typeIconClass(item.item_type)" class="grid h-8 w-8 place-items-center rounded-md">
-            <component :is="typeIcon(item.item_type)" :size="16" />
+          <span :class="typeIconClass(item.item_type)" class="type-icon small">
+            <component :is="typeIcon(item.item_type)" :size="15" />
           </span>
-          <span class="min-w-0">
-            <span class="mb-0.5 flex min-w-0 items-center gap-2">
-              <strong class="text-xs font-bold text-slate-950">{{ label(item.item_type) }}</strong>
-              <span class="truncate text-[11px] font-semibold text-slate-400">{{ item.source_app || 'Unknown' }}</span>
+          <span class="quick-item-body">
+            <span class="quick-item-meta">
+              <strong>{{ label(item.item_type) }}</strong>
+              <span>{{ item.source_app || 'Unknown' }}</span>
             </span>
-            <span class="line-clamp-2 whitespace-pre-wrap break-words text-xs leading-5 text-slate-600">{{ preview(item) }}</span>
+            <span class="quick-item-preview">{{ preview(item) }}</span>
           </span>
-          <span class="text-[11px] font-medium text-slate-400">{{ formatDate(item.created_at) }}</span>
+          <span class="quick-time">{{ formatDate(item.created_at) }}</span>
         </button>
-        <div v-if="historyLoading" class="grid min-h-28 place-items-center rounded-lg border border-slate-200 bg-white text-sm font-semibold text-slate-500">
-          <span class="inline-flex items-center gap-2">
-            <LoaderCircle :size="16" class="animate-spin" />
-            加载中
-          </span>
+
+        <div v-if="historyLoading" class="inline-state">
+          <LoaderCircle :size="16" class="animate-spin" />
+          加载中
         </div>
-        <div v-else-if="filteredHistory.length === 0" class="grid min-h-28 place-items-center rounded-lg border border-dashed border-slate-300 bg-white text-sm font-semibold text-slate-500">
-          暂无记录
-        </div>
+        <div v-else-if="filteredHistory.length === 0" class="inline-state empty">暂无记录</div>
       </section>
     </section>
 
     <template v-else>
-    <section v-if="!initialized" class="grid min-h-screen place-items-center">
-      <div class="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-600 shadow-sm">
-        <LoaderCircle :size="18" class="animate-spin text-blue-600" />
-        加载中
-      </div>
-    </section>
-
-    <section v-else-if="needsOnboarding" class="grid min-h-screen place-items-center px-8 py-6">
-      <div class="grid w-full max-w-[980px] overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
-        <div class="flex h-12 items-center justify-between border-b border-slate-200 bg-slate-50 px-4">
-          <div class="text-sm font-bold text-slate-700">Web Paste Desktop</div>
-          <div class="w-[52px]"></div>
+      <section v-if="!initialized" class="desktop-window boot-window" :class="themeClass">
+        <header class="window-titlebar" data-tauri-drag-region>
+          <WindowTraffic v-if="isMacPlatform" @minimize="minimizeWindow" @close="hideMainWindow" />
+          <div v-else class="titlebar-spacer" data-tauri-drag-region></div>
+          <div class="window-title" data-tauri-drag-region>Web Paste</div>
+          <WindowActions v-if="!isMacPlatform" @minimize="minimizeWindow" @close="hideMainWindow" />
+          <div v-else class="titlebar-spacer" data-tauri-drag-region></div>
+        </header>
+        <div class="state-pane">
+          <span class="loading-pill">
+            <LoaderCircle :size="18" class="animate-spin" />
+            加载中
+          </span>
         </div>
+      </section>
 
-        <div class="grid grid-cols-[minmax(0,1fr)_360px]">
-          <form class="grid gap-5 p-8" @submit.prevent="login">
-            <div>
-              <h1 class="text-2xl font-bold text-slate-950">登录同步</h1>
-              <p class="mt-2 text-sm font-medium text-slate-500">账号密码登录，设备会自动绑定。</p>
+      <section v-else-if="needsOnboarding" class="desktop-window onboarding-window" :class="themeClass">
+        <header class="window-titlebar" data-tauri-drag-region>
+          <WindowTraffic v-if="isMacPlatform" @minimize="minimizeWindow" @close="hideMainWindow" />
+          <div v-else class="titlebar-spacer" data-tauri-drag-region></div>
+          <div class="window-title" data-tauri-drag-region>Web Paste</div>
+          <WindowActions v-if="!isMacPlatform" @minimize="minimizeWindow" @close="hideMainWindow" />
+          <div v-else class="titlebar-spacer" data-tauri-drag-region></div>
+        </header>
+
+        <div class="login-layout">
+          <aside class="login-side">
+            <div class="brand-lockup">
+              <div class="brand-mark large">WP</div>
+              <div>
+                <strong>Web Paste</strong>
+                <span>{{ settings.device_name || 'Desktop' }}</span>
+              </div>
+            </div>
+            <div class="login-card-list">
+              <div class="feature-row">
+                <ClipboardList :size="17" />
+                <span>
+                  <strong>本地历史</strong>
+                  <small>文本、图片、路径自动归档</small>
+                </span>
+              </div>
+              <div class="feature-row">
+                <ShieldCheck :size="17" />
+                <span>
+                  <strong>隐私规则</strong>
+                  <small>应用名单和正则脱敏</small>
+                </span>
+              </div>
+              <div class="feature-row">
+                <Cloud :size="17" />
+                <span>
+                  <strong>云端同步</strong>
+                  <small>多设备实时推送</small>
+                </span>
+              </div>
+            </div>
+          </aside>
+
+          <form class="login-form" @submit.prevent="login">
+            <div class="section-heading">
+              <span class="eyebrow">Account</span>
+              <h1>登录同步</h1>
+              <p>账号密码登录，设备会自动绑定。</p>
             </div>
 
-            <div class="grid gap-3">
-              <label class="grid gap-1.5">
-                <span class="text-xs font-bold text-slate-500">用户名</span>
-                <input v-model.trim="loginForm.username" autocomplete="username" class="h-10 rounded-md border border-slate-200 bg-white px-3 text-sm font-medium outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" />
+            <div class="form-stack">
+              <label class="field">
+                <span>用户名</span>
+                <input v-model.trim="loginForm.username" autocomplete="username" spellcheck="false" />
               </label>
-              <label class="grid gap-1.5">
-                <span class="text-xs font-bold text-slate-500">密码</span>
-                <input v-model="loginForm.password" autocomplete="current-password" type="password" class="h-10 rounded-md border border-slate-200 bg-white px-3 text-sm font-medium outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" />
+              <label class="field">
+                <span>密码</span>
+                <input v-model="loginForm.password" autocomplete="current-password" type="password" />
               </label>
             </div>
 
-            <p v-if="errorMessage" class="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-red-700">{{ errorMessage }}</p>
+            <p v-if="errorMessage" class="error-banner">
+              <AlertCircle :size="16" />
+              {{ errorMessage }}
+            </p>
 
-            <div class="flex gap-2">
-              <button class="inline-flex h-10 flex-1 items-center justify-center gap-2 rounded-md bg-slate-950 px-4 text-sm font-bold text-white hover:bg-slate-800 disabled:opacity-60" type="submit" :disabled="authLoading">
+            <div class="login-actions">
+              <button class="primary-button" type="submit" :disabled="authLoading">
                 <LoaderCircle v-if="authLoading" :size="17" class="animate-spin" />
                 <LogIn v-else :size="17" />
                 登录
               </button>
-              <button class="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-4 text-sm font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-60" type="button" :disabled="authLoading" @click="enterOfflineMode">
+              <button class="secondary-button" type="button" :disabled="authLoading" @click="enterOfflineMode">
                 <HardDrive :size="17" />
                 离线模式
               </button>
             </div>
 
-            <div class="flex flex-wrap gap-3 border-t border-slate-100 pt-4 text-sm font-bold">
-              <button class="bg-transparent p-0 text-blue-700 hover:text-blue-900 disabled:opacity-60" type="button" :disabled="authLoading" @click="openWebAuth('register')">
-                注册
-              </button>
-              <button class="bg-transparent p-0 text-slate-600 hover:text-slate-950 disabled:opacity-60" type="button" :disabled="authLoading" @click="openWebAuth('forgot-password')">
-                忘记密码
-              </button>
+            <div class="link-row">
+              <button type="button" :disabled="authLoading" @click="openWebAuth('register')">注册</button>
+              <button type="button" :disabled="authLoading" @click="openWebAuth('forgot-password')">忘记密码</button>
             </div>
           </form>
+        </div>
+      </section>
 
-          <aside class="border-l border-slate-200 bg-slate-50 p-6">
-            <div class="mb-5 grid h-12 w-12 place-items-center rounded-lg bg-slate-950 text-sm font-bold text-white">WP</div>
-            <div class="grid gap-3">
-              <div class="rounded-lg border border-slate-200 bg-white p-4">
-                <ClipboardList :size="18" class="mb-3 text-blue-600" />
-                <div class="text-sm font-bold text-slate-900">本地历史</div>
-                <div class="mt-1 text-xs font-medium text-slate-500">文本、图片、路径</div>
+      <section v-else class="desktop-window" :class="themeClass">
+        <header class="window-titlebar" data-tauri-drag-region>
+          <WindowTraffic v-if="isMacPlatform" @minimize="minimizeWindow" @close="hideMainWindow" />
+          <div v-else class="titlebar-spacer" data-tauri-drag-region></div>
+          <div class="window-title" data-tauri-drag-region>
+            <span>{{ view === 'history' ? '剪切板历史' : '设置' }}</span>
+            <kbd>{{ displayShortcut(settings.global_shortcut) }}</kbd>
+          </div>
+          <WindowActions v-if="!isMacPlatform" @minimize="minimizeWindow" @close="hideMainWindow" />
+          <div v-else class="titlebar-spacer" data-tauri-drag-region></div>
+        </header>
+
+        <div class="workspace">
+          <aside class="sidebar" data-tauri-drag-region>
+            <div class="sidebar-brand">
+              <div class="brand-mark">WP</div>
+              <div class="title-copy">
+                <strong>Web Paste</strong>
+                <span>{{ accountLabel }}</span>
               </div>
-              <div class="rounded-lg border border-slate-200 bg-white p-4">
-                <ShieldCheck :size="18" class="mb-3 text-emerald-600" />
-                <div class="text-sm font-bold text-slate-900">隐私规则</div>
-                <div class="mt-1 text-xs font-medium text-slate-500">应用名单、正则脱敏</div>
+            </div>
+
+            <nav class="nav-list">
+              <button :class="{ active: view === 'history' }" type="button" title="历史" aria-label="历史" @click="view = 'history'">
+                <ClipboardList :size="17" />
+              </button>
+              <button :class="{ active: view === 'settings' }" type="button" title="设置" aria-label="设置" @click="view = 'settings'">
+                <Settings :size="17" />
+              </button>
+            </nav>
+
+            <div class="sidebar-status">
+              <div class="status-card">
+                <span :class="statusDotClass" class="status-dot"></span>
+                <div>
+                  <strong>{{ statusLabel }}</strong>
+                  <span>{{ settings.device_name || 'Desktop' }}</span>
+                </div>
               </div>
-              <div class="rounded-lg border border-slate-200 bg-white p-4">
-                <Cloud :size="18" class="mb-3 text-violet-600" />
-                <div class="text-sm font-bold text-slate-900">云端同步</div>
-                <div class="mt-1 text-xs font-medium text-slate-500">登录后静默推送</div>
-              </div>
+              <button class="secondary-button full" type="button" :disabled="pauseSaving" @click="togglePaused">
+                <LoaderCircle v-if="pauseSaving" :size="16" class="animate-spin" />
+                <Play v-else-if="paused" :size="16" />
+                <Pause v-else :size="16" />
+                {{ paused ? '恢复监听' : '暂停监听' }}
+              </button>
             </div>
           </aside>
-        </div>
-      </div>
-    </section>
 
-    <section v-else class="h-screen overflow-hidden px-5 py-4">
-      <div class="mx-auto grid h-[calc(100vh-32px)] max-w-[1240px] grid-cols-[184px_minmax(0,1fr)] overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm lg:grid-cols-[220px_minmax(0,1fr)]">
-        <aside class="flex min-h-0 flex-col border-r border-slate-200 bg-[#fbfbfc]">
-          <div class="border-b border-slate-200 px-4 py-4">
-            <div class="flex items-center gap-3">
-              <div class="grid h-9 w-9 place-items-center rounded-lg bg-slate-950 text-xs font-bold text-white">WP</div>
-              <div class="min-w-0">
-                <div class="truncate text-sm font-bold text-slate-950">Web Paste</div>
-                <div class="truncate text-xs font-medium text-slate-500">{{ accountLabel }}</div>
+          <div class="content">
+            <header class="content-toolbar">
+              <div class="toolbar-title">
+                <h1>{{ view === 'history' ? '剪切板历史' : '设置' }}</h1>
+                <span>{{ toolbarSubtitle }}</span>
               </div>
-            </div>
-          </div>
-
-          <nav class="grid gap-1 p-3">
-            <button class="flex h-10 items-center gap-3 rounded-md px-3 text-sm font-semibold" :class="view === 'history' ? 'bg-white text-slate-950 shadow-sm ring-1 ring-slate-200' : 'text-slate-600 hover:bg-white hover:text-slate-950'" type="button" @click="view = 'history'">
-              <ClipboardList :size="17" />
-              剪切板历史
-            </button>
-            <button class="flex h-10 items-center gap-3 rounded-md px-3 text-sm font-semibold" :class="view === 'settings' ? 'bg-white text-slate-950 shadow-sm ring-1 ring-slate-200' : 'text-slate-600 hover:bg-white hover:text-slate-950'" type="button" @click="view = 'settings'">
-              <Settings :size="17" />
-              设置
-            </button>
-          </nav>
-
-          <div class="mt-auto border-t border-slate-200 p-4">
-            <div class="mb-3 rounded-lg border border-slate-200 bg-white p-3">
-              <div class="mb-2 flex items-center gap-2">
-                <span :class="statusDotClass" class="h-2.5 w-2.5 rounded-full"></span>
-                <span class="text-sm font-bold text-slate-900">{{ statusLabel }}</span>
+              <div class="toolbar-actions">
+                <button class="icon-button" type="button" title="命令面板" @click="commandOpen = true">
+                  <Command :size="16" />
+                </button>
+                <button v-if="view === 'history'" class="icon-button" type="button" title="刷新" :disabled="historyLoading" @click="loadHistory">
+                  <RefreshCw :size="16" :class="{ 'animate-spin': historyLoading }" />
+                </button>
+                <button
+                  v-if="view === 'history'"
+                  class="icon-button danger"
+                  type="button"
+                  title="清空本地历史"
+                  :disabled="clearingHistory || history.length === 0"
+                  @click="clearLocalHistory"
+                >
+                  <LoaderCircle v-if="clearingHistory" :size="16" class="animate-spin" />
+                  <Trash2 v-else :size="16" />
+                </button>
+                <button class="secondary-button" type="button" :disabled="syncing || settings.offline_mode" @click="syncNow">
+                  <LoaderCircle v-if="syncing" :size="16" class="animate-spin" />
+                  <RefreshCw v-else :size="16" />
+                  同步
+                </button>
               </div>
-              <div class="truncate text-xs font-medium text-slate-500">{{ settings.device_name || 'Desktop' }}</div>
-            </div>
-            <button class="flex h-10 w-full items-center justify-center gap-2 rounded-md border border-slate-200 bg-white text-sm font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-60" type="button" :disabled="pauseSaving" @click="togglePaused">
-              <LoaderCircle v-if="pauseSaving" :size="16" class="animate-spin" />
-              <Play v-else-if="paused" :size="16" />
-              <Pause v-else :size="16" />
-              {{ paused ? '恢复监听' : '暂停监听' }}
-            </button>
-          </div>
-        </aside>
+            </header>
 
-        <div class="flex min-h-0 min-w-0 flex-col overflow-hidden bg-[#f6f7f8]">
-          <header class="flex h-[64px] shrink-0 items-center justify-between border-b border-slate-200 bg-white px-5">
-            <div>
-              <h1 class="text-base font-bold text-slate-950">{{ view === 'history' ? '剪切板历史' : '设置' }}</h1>
-              <p class="text-xs font-medium text-slate-500">{{ displayShortcut(settings.global_shortcut) }}</p>
-            </div>
-            <div class="flex items-center gap-2">
-              <button v-if="view === 'history'" class="grid h-9 w-9 place-items-center rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 disabled:opacity-60" type="button" :disabled="historyLoading" @click="loadHistory" title="刷新">
-                <RefreshCw :size="16" :class="{ 'animate-spin': historyLoading }" />
-              </button>
-              <button v-if="view === 'history'" class="grid h-9 w-9 place-items-center rounded-md border border-red-200 bg-red-50 text-red-700 hover:bg-red-100 disabled:opacity-60" type="button" :disabled="clearingHistory || history.length === 0" @click="clearLocalHistory" title="清空本地历史">
-                <LoaderCircle v-if="clearingHistory" :size="16" class="animate-spin" />
-                <Trash2 v-else :size="16" />
-              </button>
-              <button class="inline-flex h-9 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-60" type="button" :disabled="syncing || settings.offline_mode" @click="syncNow">
-                <LoaderCircle v-if="syncing" :size="16" class="animate-spin" />
-                <RefreshCw v-else :size="16" />
-                同步
+            <div v-if="errorMessage" class="error-banner floating">
+              <AlertCircle :size="17" />
+              <span>{{ errorMessage }}</span>
+              <button type="button" @click="errorMessage = ''">
+                <X :size="14" />
               </button>
             </div>
-          </header>
 
-          <div v-if="errorMessage" class="mx-5 mt-4 flex shrink-0 items-center gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-800">
-            <AlertCircle :size="17" />
-            <span class="min-w-0 flex-1">{{ errorMessage }}</span>
-            <button class="grid h-7 w-7 place-items-center rounded-md text-red-900 hover:bg-red-100" type="button" @click="errorMessage = ''">
-              <X :size="15" />
-            </button>
-          </div>
+            <section v-if="view === 'history'" class="history-view">
+              <div class="history-main">
+                <div class="filterbar">
+                  <div class="search-field">
+                    <Search :size="17" />
+                    <input v-model.trim="query" placeholder="搜索文本、路径、来源应用" spellcheck="false" @input="scheduleHistoryLoad" />
+                    <button v-if="query" class="field-clear" type="button" title="清空搜索" @click="clearDesktopSearch">
+                      <X :size="12" />
+                    </button>
+                  </div>
 
-          <section v-if="view === 'history'" class="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)] gap-4 overflow-hidden p-4 lg:p-5 xl:grid-cols-[minmax(0,1fr)_260px]">
-            <div class="flex min-h-0 flex-col gap-3">
-                <div class="flex items-center gap-3">
-                <div class="flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 shadow-sm">
-                  <Search :size="17" class="shrink-0 text-slate-400" />
-                  <input v-model.trim="query" class="h-10 min-w-0 flex-1 border-0 bg-transparent text-sm font-medium outline-none placeholder:text-slate-400" placeholder="搜索本地历史" @input="scheduleHistoryLoad" />
-                  <button v-if="query" class="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-slate-200 text-slate-500 hover:bg-slate-300 hover:text-slate-800" type="button" title="清空搜索" aria-label="清空搜索" @click="clearDesktopSearch">
-                    <X :size="12" />
-                  </button>
+                  <div class="segmented-control">
+                    <button v-for="option in typeOptions" :key="option.value" :class="{ active: typeFilter === option.value }" type="button" @click="typeFilter = option.value">
+                      {{ option.label }}
+                    </button>
+                  </div>
                 </div>
-                <select v-model="typeFilter" class="h-10 w-28 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 shadow-sm outline-none">
-                  <option value="">全部</option>
-                  <option value="text">文本</option>
-                  <option value="image">图片</option>
-                  <option value="file_path">路径</option>
-                </select>
-              </div>
 
-              <div class="scrollbar-none min-h-0 flex-1 overflow-y-auto overflow-x-hidden pr-1">
-                <div class="grid gap-2">
-                  <article v-for="item in filteredHistory" :key="item.id" class="overflow-hidden rounded-lg border border-slate-200 bg-white p-3 shadow-sm transition hover:border-slate-300">
-                    <div class="grid min-w-0 grid-cols-[40px_minmax(0,1fr)_auto] items-start gap-3">
-                      <div :class="typeIconClass(item.item_type)" class="grid h-10 w-10 shrink-0 place-items-center rounded-md">
-                        <component :is="typeIcon(item.item_type)" :size="18" />
+                <div class="history-list scrollbar-none">
+                  <article
+                    v-for="item in filteredHistory"
+                    :key="item.id"
+                    class="history-item"
+                    tabindex="0"
+                    @dblclick="copy(item.id)"
+                    @keydown.enter.prevent="copy(item.id)"
+                    @contextmenu.prevent.stop="openContextMenu($event, item)"
+                  >
+                    <div :class="typeIconClass(item.item_type)" class="type-icon">
+                      <component :is="typeIcon(item.item_type)" :size="18" />
+                    </div>
+                    <div class="item-body">
+                      <div class="item-meta">
+                        <strong>{{ label(item.item_type) }}</strong>
+                        <span :class="item.synced ? 'synced' : 'pending'" class="sync-badge">
+                          {{ item.synced ? '已同步' : '待同步' }}
+                        </span>
+                        <span class="source">{{ item.source_app || 'Unknown' }}</span>
                       </div>
-                      <div class="min-w-0 flex-1">
-                        <div class="mb-1 flex min-w-0 items-center gap-2">
-                          <strong class="text-sm font-bold text-slate-950">{{ label(item.item_type) }}</strong>
-                          <span :class="item.synced ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'" class="rounded-full px-2 py-0.5 text-[11px] font-bold">
-                            {{ item.synced ? '已同步' : '待同步' }}
-                          </span>
-                          <span class="truncate text-xs font-medium text-slate-400">{{ item.source_app || 'Unknown' }}</span>
-                        </div>
-                        <div v-if="item.item_type === 'image'" class="mt-2 flex h-24 w-40 items-center justify-center overflow-hidden rounded-md border border-slate-200 bg-slate-50">
-                          <img v-if="imagePreviewUrl(item)" :src="imagePreviewUrl(item)" alt="" class="h-full w-full object-contain" loading="lazy" />
-                          <span v-else class="px-3 text-center text-xs font-semibold text-slate-400">{{ imagePreviewText(item) }}</span>
-                        </div>
-                        <pre v-else class="max-h-24 overflow-hidden whitespace-pre-wrap break-words text-sm leading-6 text-slate-700">{{ preview(item) }}</pre>
+
+                      <div v-if="item.item_type === 'image'" class="image-preview">
+                        <img v-if="imagePreviewUrl(item)" :src="imagePreviewUrl(item)" alt="" loading="lazy" draggable="false" />
+                        <span v-else>{{ imagePreviewText(item) }}</span>
                       </div>
-                      <div class="flex min-w-8 shrink-0 flex-col items-end gap-2">
-                        <span class="hidden text-xs font-medium text-slate-400 lg:block">{{ formatDate(item.created_at) }}</span>
-                        <button class="grid h-8 w-8 place-items-center rounded-md bg-slate-950 text-white hover:bg-slate-800 disabled:opacity-60 lg:inline-flex lg:w-auto lg:gap-2 lg:px-3 lg:text-xs lg:font-bold" type="button" title="复制" :disabled="copyingId === item.id" @click="copy(item.id)">
-                          <LoaderCircle v-if="copyingId === item.id" :size="14" class="animate-spin" />
-                          <Copy v-else :size="14" />
-                          <span class="hidden lg:inline">复制</span>
-                        </button>
-                      </div>
+                      <pre v-else class="item-preview selectable-text">{{ preview(item) }}</pre>
+                    </div>
+
+                    <div class="item-actions">
+                      <span>{{ formatDate(item.created_at) }}</span>
+                      <button class="primary-button small" type="button" :disabled="copyingId === item.id" @click.stop="copy(item.id)">
+                        <LoaderCircle v-if="copyingId === item.id" :size="14" class="animate-spin" />
+                        <Copy v-else :size="14" />
+                        复制
+                      </button>
                     </div>
                   </article>
 
-                  <div v-if="historyLoading" class="grid min-h-48 place-items-center rounded-lg border border-slate-200 bg-white text-sm font-semibold text-slate-500">
-                    <span class="inline-flex items-center gap-2">
-                      <LoaderCircle :size="17" class="animate-spin" />
-                      加载中
-                    </span>
+                  <div v-if="historyLoading" class="large-state">
+                    <LoaderCircle :size="18" class="animate-spin" />
+                    加载中
                   </div>
-                  <div v-else-if="filteredHistory.length === 0" class="grid min-h-48 place-items-center rounded-lg border border-dashed border-slate-300 bg-white text-sm font-semibold text-slate-500">
+                  <div v-else-if="filteredHistory.length === 0" class="large-state empty">
+                    <ClipboardList :size="24" />
                     暂无本地记录
                   </div>
                 </div>
               </div>
-            </div>
 
-            <aside class="hidden content-start gap-3 xl:grid">
-              <section class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
-                <div class="mb-3 text-xs font-bold text-slate-500">概览</div>
-                <div class="grid gap-3">
-                  <div class="flex items-center justify-between">
-                    <span class="inline-flex items-center gap-2 text-sm font-semibold text-slate-600"><ClipboardList :size="16" />本地记录</span>
-                    <strong class="text-lg font-bold text-slate-950">{{ history.length }}</strong>
-                  </div>
-                  <div class="flex items-center justify-between">
-                    <span class="inline-flex items-center gap-2 text-sm font-semibold text-slate-600"><CheckCircle2 :size="16" />已同步</span>
-                    <strong class="text-lg font-bold text-emerald-700">{{ syncedCount }}</strong>
-                  </div>
-                  <div class="flex items-center justify-between">
-                    <span class="inline-flex items-center gap-2 text-sm font-semibold text-slate-600"><Database :size="16" />待同步</span>
-                    <strong class="text-lg font-bold text-amber-700">{{ pendingCount }}</strong>
-                  </div>
-                </div>
-              </section>
+            </section>
 
-              <section class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
-                <div class="mb-3 text-xs font-bold text-slate-500">模式</div>
-                <div class="flex items-center gap-3">
-                  <div class="grid h-10 w-10 place-items-center rounded-md bg-slate-100 text-slate-700">
-                    <HardDrive :size="18" />
+            <section v-else class="settings-view scrollbar-none">
+              <div class="settings-grid">
+                <section class="panel">
+                  <div class="panel-title">
+                    <Cloud :size="17" />
+                    <strong>账号</strong>
+                    <span :class="settings.offline_mode ? 'muted' : 'good'" class="panel-badge">
+                      {{ settings.offline_mode ? '离线模式' : '已登录' }}
+                    </span>
                   </div>
-                  <div>
-                    <div class="text-sm font-bold text-slate-950">{{ settings.offline_mode ? '离线模式' : '云端同步' }}</div>
-                    <div class="text-xs font-medium text-slate-500">{{ statusLabel }}</div>
-                  </div>
-                </div>
-              </section>
-            </aside>
-          </section>
-
-          <section v-else class="scrollbar-none min-h-0 flex-1 overflow-y-auto overflow-x-hidden p-5">
-            <div class="mx-auto grid max-w-[920px] gap-4">
-              <section class="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-                <div class="mb-4 flex items-center justify-between">
-                  <div class="flex items-center gap-2">
-                    <Cloud :size="18" class="text-blue-600" />
-                    <h2 class="text-sm font-bold text-slate-950">账号</h2>
-                  </div>
-                  <span :class="settings.offline_mode ? 'bg-slate-100 text-slate-700' : 'bg-emerald-50 text-emerald-700'" class="rounded-full px-2 py-1 text-[11px] font-bold">
-                    {{ settings.offline_mode ? '离线模式' : '已登录' }}
-                  </span>
-                </div>
-                <div class="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
-                  <div class="min-w-0">
-                    <div class="text-xs font-bold text-slate-500">当前账号</div>
-                    <div class="mt-1 truncate text-sm font-bold text-slate-950">{{ accountLabel }}</div>
-                  </div>
-                  <div class="flex shrink-0 gap-2">
-                    <button class="inline-flex h-9 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-bold text-slate-700 hover:bg-slate-50" type="button" @click="returnToLogin">
-                      <LogIn :size="16" />
-                      {{ settings.offline_mode ? '登录同步' : '切换账号' }}
-                    </button>
-                    <button v-if="!settings.offline_mode" class="inline-flex h-9 items-center gap-2 rounded-md border border-red-200 bg-red-50 px-3 text-sm font-bold text-red-700 hover:bg-red-100" type="button" @click="logout">
-                      <LogOut :size="16" />
-                      退出
-                    </button>
-                  </div>
-                </div>
-              </section>
-
-              <section class="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-                <div class="mb-4 flex items-center gap-2">
-                  <Monitor :size="18" class="text-slate-700" />
-                  <h2 class="text-sm font-bold text-slate-950">外观</h2>
-                </div>
-                <div class="grid gap-1.5">
-                  <span class="text-xs font-bold text-slate-500">主题</span>
-                  <div class="grid grid-cols-2 gap-2">
-                    <button
-                      class="inline-flex h-10 items-center justify-center gap-2 rounded-md border px-3 text-sm font-bold"
-                      :class="uiTheme === 'white' ? 'border-slate-950 bg-slate-950 text-white' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'"
-                      type="button"
-                      @click="setUiTheme('white')"
-                    >
-                      <Sun :size="16" />
-                      白色
-                    </button>
-                    <button
-                      class="inline-flex h-10 items-center justify-center gap-2 rounded-md border px-3 text-sm font-bold"
-                      :class="uiTheme === 'black' ? 'border-slate-950 bg-slate-950 text-white' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'"
-                      type="button"
-                      @click="setUiTheme('black')"
-                    >
-                      <Moon :size="16" />
-                      黑色
-                    </button>
-                  </div>
-                </div>
-              </section>
-
-              <section class="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-                <div class="mb-4 flex items-center gap-2">
-                  <Monitor :size="18" class="text-violet-600" />
-                  <h2 class="text-sm font-bold text-slate-950">设备</h2>
-                </div>
-                <div class="grid gap-3">
-                  <label class="grid gap-1.5">
-                    <span class="text-xs font-bold text-slate-500">设备名</span>
-                    <input v-model.trim="settings.device_name" class="h-10 rounded-md border border-slate-200 bg-white px-3 text-sm font-medium outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" />
-                  </label>
-                  <div class="grid gap-1.5">
-                    <span class="text-xs font-bold text-slate-500">快捷键</span>
-                    <div class="flex gap-2">
-                      <button
-                        class="flex h-10 min-w-0 flex-1 items-center justify-between rounded-md border px-3 text-left text-sm font-bold outline-none"
-                        :class="shortcutRecording ? 'border-blue-500 bg-blue-50 text-blue-700 ring-2 ring-blue-100' : 'border-slate-200 bg-white text-slate-800 hover:bg-slate-50'"
-                        type="button"
-                        @click="beginShortcutRecording"
-                        @keydown.prevent.stop="recordShortcut"
-                      >
-                        <span class="truncate">{{ shortcutRecording ? '按下组合键' : displayShortcut(settings.global_shortcut) }}</span>
-                        <span class="text-xs font-bold text-slate-400">录制</span>
+                  <div class="account-row">
+                    <div>
+                      <small>当前账号</small>
+                      <strong>{{ accountLabel }}</strong>
+                    </div>
+                    <div class="row-actions">
+                      <button class="secondary-button" type="button" @click="returnToLogin">
+                        <LogIn :size="16" />
+                        {{ settings.offline_mode ? '登录同步' : '切换账号' }}
                       </button>
-                      <button class="h-10 rounded-md border border-slate-200 bg-white px-3 text-sm font-bold text-slate-600 hover:bg-slate-50" type="button" @click="resetShortcut">默认</button>
+                      <button v-if="!settings.offline_mode" class="secondary-button danger-text" type="button" @click="logout">
+                        <LogOut :size="16" />
+                        退出
+                      </button>
                     </div>
                   </div>
-                  <label class="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
-                    <span class="min-w-0">
-                      <span class="block text-sm font-bold text-slate-950">登录时启动</span>
-                      <span class="mt-1 block text-xs font-medium text-slate-500">开机登录系统后自动启动 Web Paste</span>
-                    </span>
-                    <input v-model="settings.start_on_login" class="h-4 w-4 shrink-0 accent-slate-950" type="checkbox" />
-                  </label>
-                </div>
-              </section>
+                </section>
 
-              <section class="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-                <div class="mb-4 flex items-center gap-2">
-                  <ShieldCheck :size="18" class="text-emerald-600" />
-                  <h2 class="text-sm font-bold text-slate-950">隐私策略</h2>
-                </div>
-                <div class="grid gap-3">
-                  <label class="grid gap-1.5">
-                    <span class="text-xs font-bold text-slate-500">应用策略</span>
-                    <select v-model="settings.privacy_mode" class="h-10 rounded-md border border-slate-200 bg-white px-3 text-sm font-semibold outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100">
-                      <option value="off">关闭</option>
-                      <option value="blacklist">黑名单</option>
-                      <option value="whitelist">白名单</option>
-                    </select>
-                  </label>
-                  <label class="grid gap-1.5">
-                    <span class="text-xs font-bold text-slate-500">应用列表</span>
-                    <textarea v-model="appRulesDraft" rows="3" class="resize-y rounded-md border border-slate-200 bg-white p-3 text-sm font-medium leading-5 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" @blur="applyTextSettingsNow" />
-                  </label>
-                  <label class="grid gap-1.5">
-                    <span class="text-xs font-bold text-slate-500">脱敏正则</span>
-                    <textarea v-model="maskRulesDraft" rows="3" class="resize-y rounded-md border border-slate-200 bg-white p-3 font-mono text-xs leading-5 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" @blur="applyTextSettingsNow" />
-                    <span class="text-xs font-medium leading-5 text-slate-500">每行一条正则；命中内容会替换为等长星号。默认示例用于手机号脱敏。</span>
-                  </label>
-                </div>
-              </section>
+                <section class="panel">
+                  <div class="panel-title">
+                    <Monitor :size="17" />
+                    <strong>外观</strong>
+                  </div>
+                  <div class="setting-row">
+                    <div>
+                      <strong>主题</strong>
+                      <small>跟随桌面材质的浅色或深色界面</small>
+                    </div>
+                    <div class="segmented-control">
+                      <button :class="{ active: uiThemePreference === 'system' }" type="button" @click="setUiThemePreference('system')">
+                        <Monitor :size="15" />
+                        系统
+                      </button>
+                      <button :class="{ active: uiThemePreference === 'white' }" type="button" @click="setUiThemePreference('white')">
+                        <Sun :size="15" />
+                        浅色
+                      </button>
+                      <button :class="{ active: uiThemePreference === 'black' }" type="button" @click="setUiThemePreference('black')">
+                        <Moon :size="15" />
+                        深色
+                      </button>
+                    </div>
+                  </div>
+                </section>
 
-              <section class="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-                <div class="mb-4 flex items-center gap-2">
-                  <Webhook :size="18" class="text-amber-600" />
-                  <h2 class="text-sm font-bold text-slate-950">Webhook</h2>
-                </div>
-                <textarea v-model="webhookDraft" rows="4" class="w-full resize-y rounded-md border border-slate-200 bg-white p-3 text-sm font-medium leading-5 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" @blur="applyTextSettingsNow" />
-              </section>
-            </div>
-          </section>
+                <section class="panel">
+                  <div class="panel-title">
+                    <Keyboard :size="17" />
+                    <strong>设备</strong>
+                    <span v-if="saving" class="panel-badge muted">保存中</span>
+                  </div>
+                  <div class="form-stack">
+                    <label class="field">
+                      <span>设备名</span>
+                      <input v-model.trim="settings.device_name" spellcheck="false" />
+                    </label>
+                    <div class="field">
+                      <span>快捷键</span>
+                      <div class="shortcut-row">
+                        <button
+                          class="shortcut-recorder"
+                          :class="{ recording: shortcutRecording }"
+                          type="button"
+                          @click="beginShortcutRecording"
+                          @keydown.prevent.stop="recordShortcut"
+                        >
+                          <span>{{ shortcutRecording ? '按下组合键' : displayShortcut(settings.global_shortcut) }}</span>
+                          <kbd>录制</kbd>
+                        </button>
+                        <button class="secondary-button" type="button" @click="resetShortcut">默认</button>
+                      </div>
+                    </div>
+                    <label class="switch-row">
+                      <span>
+                        <strong>登录时启动</strong>
+                        <small>开机登录系统后自动启动 Web Paste</small>
+                      </span>
+                      <input v-model="settings.start_on_login" type="checkbox" />
+                    </label>
+                  </div>
+                </section>
+
+                <section class="panel">
+                  <div class="panel-title">
+                    <ShieldCheck :size="17" />
+                    <strong>隐私策略</strong>
+                  </div>
+                  <div class="form-stack">
+                    <label class="field">
+                      <span>应用策略</span>
+                      <select v-model="settings.privacy_mode">
+                        <option value="off">关闭</option>
+                        <option value="blacklist">黑名单</option>
+                        <option value="whitelist">白名单</option>
+                      </select>
+                    </label>
+                    <label class="field">
+                      <span>应用列表</span>
+                      <textarea v-model="appRulesDraft" rows="3" spellcheck="false" @blur="applyTextSettingsNow" />
+                    </label>
+                    <label class="field">
+                      <span>脱敏正则</span>
+                      <textarea v-model="maskRulesDraft" rows="3" class="mono" spellcheck="false" @blur="applyTextSettingsNow" />
+                    </label>
+                  </div>
+                </section>
+
+                <section class="panel">
+                  <div class="panel-title">
+                    <Webhook :size="17" />
+                    <strong>Webhook</strong>
+                  </div>
+                  <label class="field">
+                    <span>推送地址</span>
+                    <textarea v-model="webhookDraft" rows="4" spellcheck="false" @blur="applyTextSettingsNow" />
+                  </label>
+                </section>
+              </div>
+            </section>
+          </div>
         </div>
-      </div>
-    </section>
+      </section>
     </template>
 
-    <div v-if="notice" class="fixed bottom-5 right-5 z-50 flex max-w-[420px] items-center gap-3 rounded-lg px-4 py-3 text-sm font-semibold text-white shadow-xl" :class="notice.kind === 'success' ? 'bg-emerald-700' : 'bg-red-700'">
+    <div v-if="notice" class="toast" :class="notice.kind">
       <CheckCircle2 v-if="notice.kind === 'success'" :size="17" />
       <AlertCircle v-else :size="17" />
-      <span class="min-w-0 flex-1">{{ notice.text }}</span>
-      <button class="grid h-6 w-6 place-items-center rounded-md bg-white/15" type="button" @click="notice = null">
+      <span>{{ notice.text }}</span>
+      <button type="button" @click.stop="notice = null">
         <X :size="14" />
       </button>
+    </div>
+
+    <div v-if="contextMenu.open" class="context-menu" :style="contextMenuStyle" @click.stop>
+      <button type="button" :disabled="!contextMenu.item" @click="copyFromContext">
+        <Copy :size="14" />
+        复制
+        <kbd>Enter</kbd>
+      </button>
+      <button type="button" @click="loadHistory">
+        <RefreshCw :size="14" />
+        刷新
+        <kbd>⌘R</kbd>
+      </button>
+      <hr />
+      <button type="button" @click="commandOpen = true">
+        <Command :size="14" />
+        命令面板
+        <kbd>⌘K</kbd>
+      </button>
+    </div>
+
+    <div v-if="commandOpen" class="command-overlay" @click.self="commandOpen = false">
+      <section class="command-panel" role="dialog" aria-modal="true">
+        <div class="command-input">
+          <Command :size="17" />
+          <input ref="commandInputRef" v-model.trim="commandQuery" placeholder="输入命令或搜索历史" @keydown.escape="commandOpen = false" @keydown.enter.prevent="runFirstCommand" />
+        </div>
+        <div class="command-list">
+          <button v-for="action in visibleCommands" :key="action.id" type="button" @click="runCommand(action.id)">
+            <component :is="action.icon" :size="16" />
+            <span>{{ action.label }}</span>
+            <kbd v-if="action.shortcut">{{ action.shortcut }}</kbd>
+          </button>
+        </div>
+      </section>
     </div>
   </main>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, defineComponent, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { confirm } from '@tauri-apps/api/dialog';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/api/shell';
 import { invoke } from '@tauri-apps/api/tauri';
+import { appWindow } from '@tauri-apps/api/window';
 import {
   AlertCircle,
   CheckCircle2,
   ClipboardList,
   Cloud,
+  Command,
   Copy,
-  Database,
   File as FileIcon,
   FileText,
   HardDrive,
   Image as ImageIcon,
+  Keyboard,
   LoaderCircle,
   LogIn,
   LogOut,
+  Minus,
   Monitor,
   Moon,
   Pause,
@@ -497,6 +544,7 @@ import {
   Search,
   Settings,
   ShieldCheck,
+  Square,
   Sun,
   Trash2,
   Webhook,
@@ -540,11 +588,68 @@ type Notice = {
 };
 
 type UiTheme = 'white' | 'black';
+type UiThemePreference = UiTheme | 'system';
+type CommandId = 'history' | 'settings' | 'sync' | 'pause' | 'theme' | 'refresh';
+
+const WindowTraffic = defineComponent({
+  name: 'WindowTraffic',
+  emits: ['minimize', 'close'],
+  setup(_, { emit }) {
+    return () =>
+      h('div', { class: 'traffic-lights' }, [
+        h('button', { class: 'traffic close', type: 'button', title: '关闭', onClick: () => emit('close') }),
+        h('button', { class: 'traffic minimize', type: 'button', title: '最小化', onClick: () => emit('minimize') }),
+        h('span', { class: 'traffic disabled', title: '不支持最大化' })
+      ]);
+  }
+});
+
+const WindowActions = defineComponent({
+  name: 'WindowActions',
+  emits: ['minimize', 'close'],
+  setup(_, { emit }) {
+    return () =>
+      h('div', { class: 'window-actions' }, [
+        h(
+          'button',
+          {
+            class: 'window-action',
+            type: 'button',
+            title: '最小化',
+            onClick: () => emit('minimize')
+          },
+          [h(Minus, { size: 15 })]
+        ),
+        h(
+          'button',
+          {
+            class: 'window-action',
+            type: 'button',
+            title: '不支持最大化',
+            disabled: true,
+            'aria-disabled': 'true'
+          },
+          [h(Square, { size: 13 })]
+        ),
+        h(
+          'button',
+          {
+            class: 'window-action close',
+            type: 'button',
+            title: '关闭',
+            onClick: () => emit('close')
+          },
+          [h(X, { size: 15 })]
+        )
+      ]);
+  }
+});
 
 const defaultApiBase = 'https://paste-api.dangolabs.top';
 const defaultWebBase = (import.meta.env.VITE_WEB_BASE_URL || 'https://paste.dangolabs.top').replace(/\/$/, '');
 const uiThemeStorageKey = 'web-paste-ui-theme';
 const isQuickWindow = new URLSearchParams(window.location.search).get('quick') === '1';
+const isMacPlatform = /mac/i.test(navigator.platform);
 
 const settings = ref<ClientSettings>({
   api_base: defaultApiBase,
@@ -585,13 +690,29 @@ const clearingHistory = ref(false);
 const copyingId = ref('');
 const errorMessage = ref('');
 const notice = ref<Notice | null>(null);
-const uiTheme = ref<UiTheme>(readStoredUiTheme());
+const systemDark = ref(window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false);
+const uiThemePreference = ref<UiThemePreference>(readStoredUiThemePreference());
 const shortcutRecording = ref(false);
 const appRulesDraft = ref('');
 const maskRulesDraft = ref('');
 const webhookDraft = ref('');
 const imagePreviewUrls = ref(new Map<string, string>());
 const imagePreviewFailedIds = ref(new Set<string>());
+const commandOpen = ref(false);
+const commandQuery = ref('');
+const commandInputRef = ref<HTMLInputElement | null>(null);
+const contextMenu = reactive<{
+  open: boolean;
+  x: number;
+  y: number;
+  item: LocalItem | null;
+}>({
+  open: false,
+  x: 0,
+  y: 0,
+  item: null
+});
+
 const imagePreviewLoadingIds = new Set<string>();
 let imagePreviewQueue = Promise.resolve();
 let searchTimer = 0;
@@ -604,14 +725,22 @@ let settingsSaveRequestActive = false;
 let unlistenHistoryChanged: UnlistenFn | null = null;
 let unlistenShowMain: UnlistenFn | null = null;
 let syncingTextDrafts = false;
-const isMacPlatform = /mac/i.test(navigator.platform);
+const systemThemeMedia = window.matchMedia?.('(prefers-color-scheme: dark)');
+
+const typeOptions = [
+  { value: '', label: '全部' },
+  { value: 'text', label: '文本' },
+  { value: 'image', label: '图片' },
+  { value: 'file_path', label: '路径' }
+];
 
 const paused = computed(() => settings.value.paused);
 const isSignedIn = computed(() => Boolean(settings.value.token && settings.value.device_id));
 const needsOnboarding = computed(() => !settings.value.offline_mode && !isSignedIn.value);
 const pendingCount = computed(() => history.value.filter((item) => !item.synced).length);
 const syncedCount = computed(() => history.value.filter((item) => item.synced).length);
-const themeClass = computed(() => `theme-${uiTheme.value}`);
+const resolvedUiTheme = computed<UiTheme>(() => (uiThemePreference.value === 'system' ? (systemDark.value ? 'black' : 'white') : uiThemePreference.value));
+const themeClass = computed(() => `theme-${resolvedUiTheme.value}`);
 const accountLabel = computed(() => {
   if (settings.value.offline_mode) return '离线模式';
   return settings.value.account_name || '未登录';
@@ -633,6 +762,27 @@ const filteredHistory = computed(() => {
   if (!typeFilter.value) return history.value;
   return history.value.filter((item) => item.item_type === typeFilter.value);
 });
+const toolbarSubtitle = computed(() => {
+  if (view.value === 'settings') return saving.value ? '设置保存中' : '本机偏好与同步策略';
+  return `${filteredHistory.value.length} 条记录 · ${statusLabel.value}`;
+});
+const contextMenuStyle = computed(() => ({
+  left: `${contextMenu.x}px`,
+  top: `${contextMenu.y}px`
+}));
+const commands = computed(() => [
+  { id: 'history' as const, label: '打开剪切板历史', icon: ClipboardList, shortcut: '⌘1' },
+  { id: 'settings' as const, label: '打开设置', icon: Settings, shortcut: '⌘,' },
+  { id: 'refresh' as const, label: '刷新历史', icon: RefreshCw, shortcut: '⌘R' },
+  { id: 'sync' as const, label: '立即同步', icon: Cloud, shortcut: '' },
+  { id: 'pause' as const, label: paused.value ? '恢复监听' : '暂停监听', icon: paused.value ? Play : Pause, shortcut: '' },
+  { id: 'theme' as const, label: resolvedUiTheme.value === 'white' ? '切换深色主题' : '切换浅色主题', icon: resolvedUiTheme.value === 'white' ? Moon : Sun, shortcut: '' }
+]);
+const visibleCommands = computed(() => {
+  const q = commandQuery.value.toLowerCase();
+  if (!q) return commands.value;
+  return commands.value.filter((item) => item.label.toLowerCase().includes(q));
+});
 
 watch(
   settings,
@@ -648,16 +798,27 @@ watch([appRulesDraft, maskRulesDraft, webhookDraft], () => {
   scheduleTextSettingsApply();
 });
 
-function readStoredUiTheme(): UiTheme {
-  try {
-    return window.localStorage.getItem(uiThemeStorageKey) === 'black' ? 'black' : 'white';
-  } catch {
-    return 'white';
+watch(commandOpen, async (open) => {
+  if (!open) {
+    commandQuery.value = '';
+    return;
   }
+  await nextTick();
+  commandInputRef.value?.focus();
+});
+
+function readStoredUiThemePreference(): UiThemePreference {
+  try {
+    const stored = window.localStorage.getItem(uiThemeStorageKey);
+    if (stored === 'black' || stored === 'white' || stored === 'system') return stored;
+  } catch {
+    // Theme persistence is optional.
+  }
+  return 'system';
 }
 
-function setUiTheme(next: UiTheme) {
-  uiTheme.value = next;
+function setUiThemePreference(next: UiThemePreference) {
+  uiThemePreference.value = next;
   try {
     window.localStorage.setItem(uiThemeStorageKey, next);
   } catch {
@@ -666,6 +827,9 @@ function setUiTheme(next: UiTheme) {
 }
 
 onMounted(async () => {
+  installWebviewGuards();
+  window.addEventListener('keydown', handleGlobalKeydown);
+  systemThemeMedia?.addEventListener('change', handleSystemThemeChange);
   unlistenHistoryChanged = await listen('clipboard-history-changed', () => {
     scheduleHistoryReload();
   });
@@ -684,12 +848,76 @@ onBeforeUnmount(() => {
   window.clearTimeout(historyReloadTimer);
   window.clearTimeout(settingsSaveTimer);
   window.clearTimeout(textSettingsTimer);
+  window.removeEventListener('keydown', handleGlobalKeydown);
+  systemThemeMedia?.removeEventListener('change', handleSystemThemeChange);
   unlistenHistoryChanged?.();
   unlistenHistoryChanged = null;
   unlistenShowMain?.();
   unlistenShowMain = null;
   clearImagePreviews();
 });
+
+function installWebviewGuards() {
+  document.addEventListener('contextmenu', (event) => {
+    if (event.defaultPrevented) return;
+    event.preventDefault();
+  });
+  document.addEventListener('dragstart', (event) => event.preventDefault());
+  document.addEventListener(
+    'wheel',
+    (event) => {
+      if (event.ctrlKey || event.metaKey) event.preventDefault();
+    },
+    { passive: false }
+  );
+}
+
+function handleSystemThemeChange(event: MediaQueryListEvent) {
+  systemDark.value = event.matches;
+}
+
+function handleGlobalKeydown(event: KeyboardEvent) {
+  const commandKey = isMacPlatform ? event.metaKey : event.ctrlKey;
+  if ((event.ctrlKey || event.metaKey) && ['+', '=', '-', '0'].includes(event.key)) {
+    event.preventDefault();
+    return;
+  }
+  if (commandKey && event.key.toLowerCase() === 'k') {
+    event.preventDefault();
+    commandOpen.value = true;
+    return;
+  }
+  if (commandKey && event.key.toLowerCase() === 'r') {
+    event.preventDefault();
+    void loadHistory();
+    return;
+  }
+  if (commandKey && event.key === '1') {
+    event.preventDefault();
+    view.value = 'history';
+    return;
+  }
+  if (commandKey && event.key === ',') {
+    event.preventDefault();
+    view.value = 'settings';
+  }
+}
+
+async function minimizeWindow() {
+  try {
+    await appWindow.minimize();
+  } catch (err) {
+    console.warn('minimize window failed', err);
+  }
+}
+
+async function hideMainWindow() {
+  try {
+    await invoke('hide_main_window');
+  } catch (err) {
+    console.warn('hide main window failed', err);
+  }
+}
 
 async function loadInitial() {
   errorMessage.value = '';
@@ -1003,18 +1231,59 @@ async function copy(id: string) {
   try {
     await invoke('recopy_item', { id });
     showNotice('success', '已复制到剪切板');
-    if (!isQuickWindow) {
-      try {
-        await invoke('hide_main_window');
-      } catch (err) {
-        console.warn('hide main window failed', err);
-      }
-    }
+    if (!isQuickWindow) await hideMainWindow();
   } catch (err) {
     errorMessage.value = messageFromError(err, '复制失败');
     showNotice('error', errorMessage.value);
   } finally {
     copyingId.value = '';
+  }
+}
+
+function openContextMenu(event: MouseEvent, item: LocalItem | null = null) {
+  contextMenu.open = true;
+  contextMenu.item = item;
+  contextMenu.x = Math.min(event.clientX, window.innerWidth - 190);
+  contextMenu.y = Math.min(event.clientY, window.innerHeight - 138);
+}
+
+function closeContextMenu() {
+  contextMenu.open = false;
+}
+
+async function copyFromContext() {
+  if (!contextMenu.item) return;
+  const id = contextMenu.item.id;
+  closeContextMenu();
+  await copy(id);
+}
+
+function runFirstCommand() {
+  const first = visibleCommands.value[0];
+  if (first) runCommand(first.id);
+}
+
+function runCommand(id: CommandId) {
+  commandOpen.value = false;
+  switch (id) {
+    case 'history':
+      view.value = 'history';
+      break;
+    case 'settings':
+      view.value = 'settings';
+      break;
+    case 'refresh':
+      void loadHistory();
+      break;
+    case 'sync':
+      void syncNow();
+      break;
+    case 'pause':
+      void togglePaused();
+      break;
+    case 'theme':
+      setUiThemePreference(resolvedUiTheme.value === 'white' ? 'black' : 'white');
+      break;
   }
 }
 
@@ -1027,9 +1296,9 @@ function typeIcon(type: string) {
 }
 
 function typeIconClass(type: string) {
-  if (type === 'image') return 'bg-sky-50 text-sky-700';
-  if (type === 'file_path') return 'bg-violet-50 text-violet-700';
-  return 'bg-teal-50 text-teal-700';
+  if (type === 'image') return 'type-sky';
+  if (type === 'file_path') return 'type-violet';
+  return 'type-teal';
 }
 
 function preview(item: LocalItem) {

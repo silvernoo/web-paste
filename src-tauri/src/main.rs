@@ -310,8 +310,8 @@ fn main() {
             });
             app.manage(state.clone());
             start_single_instance_listener(single_instance_listener, app.handle());
-            if start_hidden {
-                if let Some(window) = app.get_window("main") {
+            if let Some(window) = app.get_window("main") {
+                if start_hidden {
                     let _ = window.hide();
                 }
             }
@@ -348,9 +348,14 @@ fn main() {
             open_main_window
         ])
         .on_window_event(|event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event.event() {
-                api.prevent_close();
-                let _ = event.window().hide();
+            if event.window().label() == "main" {
+                match event.event() {
+                    tauri::WindowEvent::CloseRequested { api, .. } => {
+                        api.prevent_close();
+                        let _ = event.window().hide();
+                    }
+                    _ => {}
+                }
             }
         })
         .on_system_tray_event(handle_tray_event)

@@ -506,6 +506,7 @@ import {
 interface ClientSettings {
   api_base: string;
   token: string;
+  refresh_token: string;
   device_id: string;
   device_name: string;
   device_fingerprint: string;
@@ -548,6 +549,7 @@ const isQuickWindow = new URLSearchParams(window.location.search).get('quick') =
 const settings = ref<ClientSettings>({
   api_base: defaultApiBase,
   token: '',
+  refresh_token: '',
   device_id: '',
   device_name: 'Desktop',
   device_fingerprint: '',
@@ -1103,6 +1105,7 @@ function normalizeSettings(next: ClientSettings): ClientSettings {
   return {
     ...next,
     api_base: defaultApiBase,
+    refresh_token: next.refresh_token || '',
     account_name: next.account_name || '',
     offline_mode: Boolean(next.offline_mode),
     start_on_login: Boolean(next.start_on_login)

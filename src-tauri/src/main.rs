@@ -45,6 +45,8 @@ const DESKTOP_TOKEN_REFRESH_INTERVAL: Duration = Duration::from_secs(30 * 60);
 struct ClientSettings {
     api_base: String,
     token: String,
+    #[serde(default)]
+    refresh_token: String,
     device_id: String,
     device_name: String,
     device_fingerprint: String,
@@ -70,6 +72,7 @@ impl Default for ClientSettings {
         Self {
             api_base: DEFAULT_API_BASE.to_string(),
             token: String::new(),
+            refresh_token: String::new(),
             device_id: String::new(),
             device_name: hostname(),
             device_fingerprint: Uuid::new_v4().to_string(),
@@ -363,6 +366,8 @@ fn get_client_settings(state: State<'_, Arc<AppState>>) -> Result<ClientSettings
 #[derive(Debug, Deserialize)]
 struct AuthResponse {
     token: String,
+    #[serde(default)]
+    refresh_token: String,
     user: AuthUser,
     device: Option<AuthDevice>,
 }
@@ -451,6 +456,7 @@ async fn login_with_password(
             "email": username,
             "password": password,
             "remember_me": true,
+            "desktop_client": true,
             "device": {
                 "fingerprint": fingerprint,
                 "name": device_name,
@@ -474,6 +480,7 @@ async fn login_with_password(
     let mut next = current;
     next.api_base = api_base;
     next.token = auth.token;
+    next.refresh_token = auth.refresh_token;
     next.device_id = device_id;
     next.device_name = device_name;
     next.device_fingerprint = fingerprint;
@@ -503,6 +510,7 @@ fn use_offline_mode(state: State<'_, Arc<AppState>>) -> Result<ClientSettings, S
     next.api_base = DEFAULT_API_BASE.to_string();
     next.offline_mode = true;
     next.token.clear();
+    next.refresh_token.clear();
     next.device_id.clear();
     next.account_id.clear();
     next.account_name.clear();
@@ -519,6 +527,7 @@ fn logout_client(state: State<'_, Arc<AppState>>) -> Result<ClientSettings, Stri
     next.api_base = DEFAULT_API_BASE.to_string();
     next.offline_mode = false;
     next.token.clear();
+    next.refresh_token.clear();
     next.device_id.clear();
     next.account_id.clear();
     next.account_name.clear();
@@ -1088,12 +1097,23 @@ async fn force_sync_inner(state: Arc<AppState>, app: Option<AppHandle>) -> Resul
 
     let client = Client::new();
     let url = format!("{}/api/sync/batch", settings.api_base.trim_end_matches('/'));
-    let res = client
-        .post(url)
+    let payload = json!({ "records": records });
+    let mut res = client
+        .post(&url)
         .bearer_auth(&settings.token)
-        .json(&json!({ "records": records }))
+        .json(&payload)
         .send()
         .await?;
+    if res.status() == StatusCode::UNAUTHORIZED {
+        if let Some(refreshed) = refresh_desktop_access_token(state.clone()).await? {
+            res = client
+                .post(&url)
+                .bearer_auth(&refreshed.token)
+                .json(&payload)
+                .send()
+                .await?;
+        }
+    }
     apply_renewed_token_from_headers(&state, res.headers())?;
     if !res.status().is_success() {
         return Ok(false);
@@ -1355,6 +1375,20 @@ async fn realtime_event_loop(
             }
             Err(err) => {
                 eprintln!("websocket connect failed: {err}");
+                if websocket_error_is_unauthorized(&err) {
+                    match refresh_desktop_access_token(state.clone()).await {
+                        Ok(Some(_)) => {
+                            runtime.shutdown.store(true, Ordering::Relaxed);
+                            return;
+                        }
+                        Ok(None) => {}
+                        Err(refresh_err) => {
+                            eprintln!(
+                                "desktop token refresh after websocket 401 failed: {refresh_err}"
+                            );
+                        }
+                    }
+                }
             }
         }
         tokio::time::sleep(reconnect_delay).await;
@@ -1375,6 +1409,11 @@ async fn connect_realtime_websocket(
         HeaderValue::from_str(&format!("Bearer {}", runtime.token))?,
     );
     Ok(connect_async(request).await?)
+}
+
+fn websocket_error_is_unauthorized(err: &anyhow::Error) -> bool {
+    let text = err.to_string().to_lowercase();
+    text.contains("401") || text.contains("unauthorized")
 }
 
 fn websocket_url(api_base: &str, device_id: &str) -> Result<String> {
@@ -1521,6 +1560,65 @@ fn reset_token_refresh_timer(state: &Arc<AppState>, value: Option<Instant>) {
     }
 }
 
+async fn refresh_desktop_access_token(state: Arc<AppState>) -> Result<Option<ClientSettings>> {
+    let settings = state
+        .settings
+        .lock()
+        .map_err(|_| anyhow!("settings lock poisoned"))?
+        .clone();
+    if settings.offline_mode
+        || settings.api_base.trim().is_empty()
+        || settings.device_id.trim().is_empty()
+        || settings.refresh_token.trim().is_empty()
+    {
+        return Ok(None);
+    }
+
+    let client = Client::new();
+    let url = format!(
+        "{}/api/auth/desktop/refresh",
+        settings.api_base.trim_end_matches('/')
+    );
+    let res = client
+        .post(url)
+        .json(&json!({
+            "refresh_token": settings.refresh_token,
+            "device_id": settings.device_id
+        }))
+        .send()
+        .await?;
+    let status = res.status();
+    let body = res.text().await?;
+    if !status.is_success() {
+        return Err(anyhow!(
+            "desktop refresh token rejected: {}",
+            error_message_from_body(&body, &status.to_string())
+        ));
+    }
+    let auth: AuthResponse = serde_json::from_str(&body)?;
+    let mut next = settings;
+    next.token = auth.token;
+    if !auth.refresh_token.trim().is_empty() {
+        next.refresh_token = auth.refresh_token;
+    }
+    if let Some(device) = auth.device {
+        next.device_id = device.id;
+    }
+    next.account_id = auth.user.id;
+    next.account_name = auth.user.email;
+    next.offline_mode = false;
+
+    save_settings_to_db(&state.db_path, &next)?;
+    *state
+        .settings
+        .lock()
+        .map_err(|_| anyhow!("settings lock poisoned"))? = next.clone();
+    reset_token_refresh_timer(&state, Some(Instant::now()));
+    clear_realtime_runtime(&state);
+    eprintln!("desktop access token refreshed");
+    Ok(Some(next))
+}
+
 async fn refresh_desktop_token_if_due(state: Arc<AppState>) -> Result<()> {
     let settings = state
         .settings
@@ -1554,7 +1652,8 @@ async fn refresh_desktop_token_if_due(state: Arc<AppState>) -> Result<()> {
     let status = res.status();
     apply_renewed_token_from_headers(&state, res.headers())?;
     if status == StatusCode::UNAUTHORIZED {
-        return Err(anyhow!("desktop token unauthorized"));
+        refresh_desktop_access_token(state).await?;
+        return Ok(());
     }
     if !status.is_success() {
         return Err(anyhow!("desktop token refresh returned {status}"));
